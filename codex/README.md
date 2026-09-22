@@ -67,6 +67,10 @@ rather than the script contents — so you can update the adapter without re-app
   reconcile, where there is time to do it properly.
 - **A session killed outright never fires `SessionEnd`.** The daemon retires it when
   its process disappears, and the registration is pruned on the same basis.
+- **Approval markers share the state directory with registrations** and also end in
+  `.json`, so the registration reader skips them explicitly. Without that they were
+  parsed as registrations and the missing fields threw under StrictMode, which took
+  down the daemon's entire reconcile rather than just this adapter.
 
 ## What works, and what does not yet
 
@@ -75,11 +79,22 @@ prompt and each tool call through the turn, shows the final reply, and is retire
 when the session ends — confirmed in the daemon log as `dashboard rebuilt for 3
 session(s)` followed by `retired session`.
 
-**Answering from Home Assistant is not wired up yet.** Codex has a
-`PermissionRequest` hook and `PreToolUse` can return `allow`/`deny`/`ask`, which is
-the natural way to approve a command from your phone, but that path is not built. The
-reply box is also not yet connected, though console injection into Codex is proven
-(`ok:44` into a live session), so it is a small step rather than a new mechanism.
+**Approving commands from Home Assistant works.** Codex runs `PermissionRequest`
+before showing its own approval UI, and a hook that writes nothing to stdout reads as
+"no decision", so the terminal prompt still appears. The dashboard is therefore a
+second way to answer rather than a replacement, and whichever is used first wins —
+the same arrangement Copilot's `ask_user` uses.
+
+Verified end to end: Codex asked to run a command outside its sandbox, the card armed
+showing that exact command, approving on the dashboard delivered the answer into the
+session, and the command ran.
+
+Note that `PermissionRequest` only fires in an interactive session. `codex exec`
+reports `approval: never` regardless of `approval_policy`, because it has no way to
+ask.
+
+**Chain-of-thought is not streamed yet.** The hooks carry activity but not reasoning;
+that lives in the rollout transcript and needs a reducer. Tracked separately.
 
 ## Uninstall
 

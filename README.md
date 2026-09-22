@@ -305,7 +305,8 @@ cd codex
 .\install-codex.ps1
 ```
 
-Answering from Home Assistant is not wired up for Codex yet. See
+Commands awaiting approval appear on the card and can be approved or denied from
+Home Assistant, while the terminal prompt stays usable. See
 [`codex/README.md`](codex/README.md) — and note the hooks must be **trusted once** in
 Codex or they are skipped silently.
 

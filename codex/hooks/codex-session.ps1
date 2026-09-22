@@ -179,8 +179,15 @@ function Get-CodexSessionRegistrations {
     }
 
     foreach ($file in Get-ChildItem -LiteralPath $root -Filter '*.json' -File -ErrorAction SilentlyContinue) {
+        # Approval markers live in the same directory and also end in .json, so they
+        # have to be skipped explicitly. Without this they are parsed as registrations,
+        # and the missing fields throw under StrictMode - which took the daemon's whole
+        # reconcile down, not just this function.
+        if ($file.Name -like '*.approval.json') { continue }
+
         $entry = try { Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json } catch { $null }
         if (-not $entry) { continue }
+        if ($entry.PSObject.Properties.Name -notcontains 'SessionId') { continue }
 
         $ended = ($entry.PSObject.Properties.Name -contains 'Ended' -and $entry.Ended)
         $knownPid = ($entry.PSObject.Properties.Name -contains 'ProcessId' -and [int]$entry.ProcessId -gt 0)
@@ -189,7 +196,9 @@ function Get-CodexSessionRegistrations {
             $alive = $livePids.ContainsKey([int]$entry.ProcessId)
         }
         $fresh = $true
-        if ($entry.Updated) { $fresh = ([DateTimeOffset]::Parse($entry.Updated) -gt $cutoff) }
+        if ($entry.PSObject.Properties.Name -contains 'Updated' -and $entry.Updated) {
+            $fresh = ([DateTimeOffset]::Parse($entry.Updated) -gt $cutoff)
+        }
 
         # Prune when the session is definitively over: it said goodbye, its process is
         # gone, or it went quiet for long enough to be abandoned. The middle case
