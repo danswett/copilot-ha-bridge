@@ -13,3 +13,7 @@ copilot-bridge-daemon-state.json
 .idea/
 Thumbs.db
 desktop.ini
+
+# MCP server
+mcp/node_modules/
+mcp/package-lock.json

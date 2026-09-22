@@ -233,6 +233,18 @@ Get-Content $env:TEMP\copilot-bridge-daemon.log -Tail 20
 
 ---
 
+## Other clients (experimental)
+
+[`mcp/`](mcp/) holds a separate MCP server that brings the *ask* half of this to
+Claude Desktop and other MCP clients, on any OS. It races a Home Assistant card
+against the app's own elicitation prompt and cancels whichever loses.
+
+It is a sibling, not a replacement: an MCP server never sees the transcript and can't
+start a turn, so there is no activity streaming and no reply-after-the-turn. See
+[`mcp/README.md`](mcp/README.md).
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
