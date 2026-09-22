@@ -1048,7 +1048,9 @@ function Get-CopilotSessionDisplay {
         [string]$WorkingDirectory
     )
 
-    $name = "Copilot session $($SessionId.Substring(0, [Math]::Min(8, $SessionId.Length)))"
+    # Prefixed to match the Claude and Codex adapters, so a shared dashboard shows at
+    # a glance which front end each card belongs to.
+    $name = "Copilot: $($SessionId.Substring(0, [Math]::Min(8, $SessionId.Length)))"
     $workspacePath = Join-Path (
         Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
     ) 'workspace.yaml'
@@ -1059,7 +1061,7 @@ function Get-CopilotSessionDisplay {
         if ($nameMatch) {
             $parsedName = $nameMatch.Matches.Groups[1].Value.Trim().Trim('"', "'")
             if (-not [string]::IsNullOrWhiteSpace($parsedName)) {
-                $name = $parsedName
+                $name = "Copilot: $parsedName"
             }
         }
 

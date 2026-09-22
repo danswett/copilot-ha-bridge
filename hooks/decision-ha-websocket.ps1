@@ -314,8 +314,28 @@ function Initialize-CopilotVerboseToggle {
     param(
         [string]$HelperId = 'copilot_cli_live_verbose',
         [string]$Name = 'Copilot CLI Live Verbose',
-        [string]$Icon = 'mdi:brain'
+        [string]$Icon = 'mdi:brain',
+        [string]$DisplayName = 'Live Verbose (chain-of-thought)'
     )
+
+    # Applied on both paths below - an existing helper and a freshly created one -
+    # because an install that predates this still carries the old display name.
+    $applyDisplayName = {
+        try {
+            $registry = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
+            $entry = @($registry) | Where-Object { [string]$_.entity_id -eq "input_boolean.$HelperId" } | Select-Object -First 1
+            if ($entry -and [string]$entry.name -ne $DisplayName) {
+                [void](Invoke-CopilotHaWebSocket -Commands @(@{
+                    type      = 'config/entity_registry/update'
+                    entity_id = "input_boolean.$HelperId"
+                    name      = $DisplayName
+                }))
+            }
+        }
+        catch {
+            # A cosmetic rename is never worth failing provisioning over.
+        }
+    }
 
     try {
         $existing = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'input_boolean/list' }))[0]
@@ -323,7 +343,10 @@ function Initialize-CopilotVerboseToggle {
             # Present in storage is not proof of a working entity: if the entity_id was
             # previously occupied by a bare state object, the helper can register
             # without ever materialising a state. Recreate it when that happens.
-            if (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId") { return $true }
+            if (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId") {
+                & $applyDisplayName
+                return $true
+            }
             [void](Invoke-CopilotHaWebSocket -Commands @(@{
                 type = 'input_boolean/delete'; input_boolean_id = $HelperId
             }))
@@ -342,7 +365,14 @@ function Initialize-CopilotVerboseToggle {
             Write-Warning "Created verbose toggle as '$($created.id)', expected '$HelperId'."
             return $false
         }
-        return (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId")
+        if (-not (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId")) { return $false }
+
+        # Give it a harness-agnostic display name without renaming the helper itself:
+        # the entity_id is derived from the helper's name, and the dashboard and the
+        # daemon both address it as input_boolean.copilot_cli_live_verbose.
+        & $applyDisplayName
+
+        return $true
     }
     catch {
         Write-Warning "Could not ensure the verbose toggle: $($_.Exception.Message)"
@@ -453,7 +483,7 @@ function Save-CopilotSessionDashboard {
     $controlMarkdown = @{
         type = 'markdown'
         content = @(
-            '## Copilot CLI sessions'
+            '## Agent sessions'
             ''
             "**Live sessions:** $liveTemplate &bull; **Pending decisions:** $pendingTemplate"
             ''
@@ -465,7 +495,7 @@ function Save-CopilotSessionDashboard {
         type = 'entities'
         entities = @(
             @{ entity = $VerboseToggle; name = 'Live Verbose (chain-of-thought)' }
-            @{ entity = 'sensor.copilot_cli_sessions'; name = 'Live session count' }
+            @{ entity = 'sensor.copilot_cli_sessions'; name = 'Live sessions' }
         )
     }
 
@@ -709,7 +739,7 @@ ha-card {
     if ($sessionSections.Count -eq 0) {
         $sessionSections = @(@{
             type = 'markdown'
-            content = 'No live Copilot CLI sessions right now.'
+            content = 'No live agent sessions right now.'
         })
     }
 

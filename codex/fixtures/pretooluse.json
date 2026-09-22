@@ -1,0 +1,2 @@
+{"session_id":"01a0cab3-a184-7642-80af-56b9235d6a58","turn_id":"01a0cab3-a219-7051-95fb-c1ebbaac066b","transcript_path":"C:\\\\Users\\\\example\\.codex\\sessions\\2026\\09\\22\\rollout-2026-09-22T12-59-25-01a0cab3-a184-7642-80af-56b9235d6a58.jsonl","cwd":"C:\\\\Users\\\\example\\codex-probe","hook_event_name":"PreToolUse","model":"gpt-6-astra","permission_mode":"bypassPermissions","tool_name":"Bash","tool_input":{"command":"echo hello-from-codex"},"tool_use_id":"exec-36abbd77-73be-41e9-bd47-37369cf00f6d"}
+

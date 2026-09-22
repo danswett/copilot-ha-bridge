@@ -293,6 +293,22 @@ cd claude
 See [`claude/README.md`](claude/README.md), which states exactly what is verified
 against a live session and what is not.
 
+### Codex CLI — session cards and live activity
+
+[`codex/`](codex/) gives OpenAI Codex CLI a card per session showing the prompt, each
+command as it runs, and the final reply. Codex's hooks carry all of that directly, so
+no transcript reading is needed, and it is the only front end that fires an explicit
+`SessionEnd` — cards retire because the session ended, not because a process vanished.
+
+```powershell
+cd codex
+.\install-codex.ps1
+```
+
+Answering from Home Assistant is not wired up for Codex yet. See
+[`codex/README.md`](codex/README.md) — and note the hooks must be **trusted once** in
+Codex or they are skipped silently.
+
 ### Anything else, via MCP (experimental)
 
 [`mcp/`](mcp/) holds a separate MCP server that brings the *ask* half of this to

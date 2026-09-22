@@ -186,6 +186,61 @@ if (Test-Path -LiteralPath (Join-Path $claudeHooks 'claude-session.ps1')) {
     }
 }
 
+$script:CodexAdapterLoaded = $false
+$codexHooks = Join-Path $HOME '.copilot\codex-bridge\plugins\copilot-ha-bridge\hooks'
+if (Test-Path -LiteralPath (Join-Path $codexHooks 'codex-session.ps1')) {
+    try {
+        . (Join-Path $codexHooks 'codex-session.ps1')
+        $script:CodexAdapterLoaded = $true
+    }
+    catch {
+        $script:CodexAdapterLoaded = $false
+    }
+}
+
+function Get-LiveCodexSessions {
+    <#
+        Live Codex sessions, from the registrations its hooks write.
+
+        Codex needs no transcript tailing: its hooks report every prompt, tool call
+        and reply directly, and the hook records the resulting status and activity in
+        the registration. The daemon therefore publishes what the registration already
+        says rather than deriving it.
+
+        Liveness is authoritative here in a way it is not for the others, because
+        Codex fires an explicit SessionEnd.
+    #>
+    if (-not $script:CodexAdapterLoaded) { return @{} }
+
+    $live = @{}
+    foreach ($registration in @(Get-CodexSessionRegistrations)) {
+        if (-not $registration.IsLive) { continue }
+        $live[$registration.SessionId] = [pscustomobject]@{
+            SessionId        = $registration.SessionId
+            ProcessId        = $registration.ProcessId
+            Transcript       = $registration.TranscriptPath
+            WorkingDirectory = $registration.WorkingDirectory
+            Status           = $registration.Status
+            Activity         = $registration.Activity
+            LastWrite        = [DateTime]::UtcNow
+            Kind             = 'codex'
+        }
+    }
+    $live
+}
+
+function Get-LiveBridgeSessions {
+    <# Every live session across the front ends the bridge supports. #>
+    $live = Get-LiveCopilotSessions
+    foreach ($entry in (Get-LiveClaudeSessions).GetEnumerator()) {
+        $live[$entry.Key] = $entry.Value
+    }
+    foreach ($entry in (Get-LiveCodexSessions).GetEnumerator()) {
+        $live[$entry.Key] = $entry.Value
+    }
+    $live
+}
+
 function Get-LiveClaudeSessions {
     <#
         Live Claude Code sessions, from the registrations its hooks write.
@@ -213,15 +268,6 @@ function Get-LiveClaudeSessions {
     $live
 }
 
-function Get-LiveBridgeSessions {
-    <# Every live session across the front ends the bridge supports. #>
-    $live = Get-LiveCopilotSessions
-    foreach ($entry in (Get-LiveClaudeSessions).GetEnumerator()) {
-        $live[$entry.Key] = $entry.Value
-    }
-    $live
-}
-
 function Get-BridgeSessionDisplay {
     param(
         [Parameter(Mandatory)][string]$SessionId,
@@ -231,6 +277,9 @@ function Get-BridgeSessionDisplay {
 
     if ($Kind -eq 'claude' -and $script:ClaudeAdapterLoaded) {
         return Get-ClaudeSessionDisplay -SessionId $SessionId -WorkingDirectory $WorkingDirectory
+    }
+    if ($Kind -eq 'codex' -and $script:CodexAdapterLoaded) {
+        return Get-CodexSessionDisplay -SessionId $SessionId -WorkingDirectory $WorkingDirectory
     }
     Get-CopilotSessionDisplay -SessionId $SessionId -WorkingDirectory $WorkingDirectory
 }
@@ -266,12 +315,16 @@ function Test-BridgeSessionWorking {
     param(
         [Parameter(Mandatory)][string]$SessionId,
         [string]$Kind = 'copilot',
-        [string]$Transcript
+        [string]$Transcript,
+        [string]$Status
     )
+
+    # Codex reports its own status: a turn begins at UserPromptSubmit and ends at
+    # Stop, both of which the hook records, so there is nothing to infer.
+    if ($Kind -eq 'codex') { return ($Status -eq 'working') }
 
     if ($Kind -ne 'claude') { return Test-CopilotSessionWorking -SessionId $SessionId }
     if (-not $script:ClaudeAdapterLoaded -or -not $Transcript) { return $false }
-
     # Claude writes no turn-end entry, so freshness is the best available signal at
     # adoption time; the Stop hook corrects it authoritatively at the next turn end.
     try {
@@ -1084,8 +1137,13 @@ function Sync-DaemonSessions {
                 Write-DaemonLog -Message "provisioning failed for $id : $($_.Exception.Message)"
             }
 
-            $initialStatus = if (Test-BridgeSessionWorking -SessionId $id -Kind $kind -Transcript $session.Transcript) { 'working' } else { 'idle' }
-            $initialActivity = if ($initialStatus -eq 'working') { 'Working' } else { 'Idle' }
+            $sessionStatus = if ($session.PSObject.Properties.Name -contains 'Status') { [string]$session.Status } else { '' }
+            $initialStatus = if (Test-BridgeSessionWorking -SessionId $id -Kind $kind -Transcript $session.Transcript -Status $sessionStatus) { 'working' } else { 'idle' }
+            $initialActivity = if ($session.PSObject.Properties.Name -contains 'Activity' -and $session.Activity) {
+                # Codex hooks record the real activity - the prompt, the running tool,
+                # the reply - so a placeholder would be a downgrade.
+                [string]$session.Activity
+            } elseif ($initialStatus -eq 'working') { 'Working' } else { 'Idle' }
             try {
                 Set-CopilotMqttStatus -SessionId $id -Status $initialStatus -Headers $Headers -Attributes @{
                     session = $display.Name
@@ -1120,12 +1178,22 @@ function Sync-DaemonSessions {
         }
 
         $entryKind = if ($entry.PSObject.Properties.Name -contains 'Kind' -and $entry.Kind) { [string]$entry.Kind } else { 'copilot' }
+        # Codex publishes its own activity from its hooks, so there is no transcript
+        # to tail and nothing to reduce.
+        if ($entryKind -eq 'codex') { continue }
 
         # A session published before it wrote its workspace file only had a generic
         # name to go on. Names are otherwise resolved once, so re-resolve while the
         # stored one is still the fallback; the real task name usually appears within
         # a reconcile or two of the session starting.
-        if ([string]$entry.Name -match '^Copilot session [0-9a-f]{8}$') {
+        # Re-resolve a session's name when the stored one is stale. Two cases: a
+        # session published before it wrote its workspace file still carries the id
+        # fallback, and a session published by an older build carries no harness
+        # prefix at all. Both self-heal on the next reconcile rather than needing the
+        # state file to be cleared by hand.
+        $needsName = ($entryKind -eq 'copilot' -and [string]$entry.Name -notmatch '^Copilot: ') -or
+                     ([string]$entry.Name -match '^Copilot: [0-9a-f]{8}$')
+        if ($needsName) {
             $workingDirectory = if ($session.PSObject.Properties.Name -contains 'WorkingDirectory' -and $session.WorkingDirectory) {
                 [string]$session.WorkingDirectory
             } else { 'Unknown folder' }

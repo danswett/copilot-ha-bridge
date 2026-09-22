@@ -153,7 +153,7 @@ function New-CopilotMqttDeviceBlock {
     @{
         identifiers = @($Node)
         name = "Copilot: $SessionName"
-        manufacturer = 'GitHub Copilot CLI'
+        manufacturer = 'AI CLI bridge'
         model = $Machine
     }
 }
@@ -364,13 +364,13 @@ function Publish-CopilotMqttUpdate {
 
     $device = @{
         identifiers  = @('copilot_cli_bridge')
-        name         = 'Copilot CLI Bridge'
-        manufacturer = 'GitHub Copilot CLI'
+        name         = 'AI Agent Bridge'
+        manufacturer = 'AI CLI bridge'
     }
     $stateTopic = "$($script:CopilotMqttConfig.TopicRoot)/update/state"
 
     $config = @{
-        name        = 'Bridge Update'
+        name        = 'Update'
         unique_id   = 'copilot_cli_update'
         object_id   = 'copilot_cli_update'
         state_topic = $stateTopic
@@ -436,7 +436,7 @@ function Publish-CopilotMqttGlobalStatus {
     $attrTopic = "$($script:CopilotMqttConfig.TopicRoot)/global/attr"
 
     $config = @{
-        name = 'Copilot Sessions'
+        name = 'Sessions'
         unique_id = 'copilot_cli_sessions'
         object_id = 'copilot_cli_sessions'
         state_topic = $stateTopic
@@ -444,8 +444,8 @@ function Publish-CopilotMqttGlobalStatus {
         icon = 'mdi:robot-happy'
         device = @{
             identifiers = @('copilot_cli_bridge')
-            name = 'Copilot CLI Bridge'
-            manufacturer = 'GitHub Copilot CLI'
+            name = 'AI Agent Bridge'
+            manufacturer = 'AI CLI bridge'
         }
     }
     Publish-CopilotMqttMessage `
