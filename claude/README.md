@@ -53,10 +53,25 @@ signed-in Claude Code 2.1.272 on Windows:
 
 **Not verified:** the `AskUserQuestion` path, because **that tool is not exposed in this
 build**. Asked to use it, Claude searched `select:AskUserQuestion` three times and
-replied "There's no AskUserQuestion tool available in this environment". The handling
-is built to the contract embedded in the shipping binary and covered by unit tests, but
-it has never run against a real question. `Notification` is what carries
-attention-needed events in this build, which is why it is hooked too.
+replied "There's no AskUserQuestion tool available in this environment", and it is
+absent from the tool list Claude advertises at startup. It is compiled in — the tool's
+description and `CLAUDE_CODE_QUESTION_PREVIEW_FORMAT` are both present in the binary —
+just not offered, exactly like `EnterPlanMode`. The handling is built to the contract
+embedded in that binary and covered by unit tests, but it has never run against a real
+question. `Notification` is what carries attention-needed events in this build, which
+is why it is hooked too.
+
+To close that gap the moment the tool appears:
+
+```powershell
+.\tests\verify-askuserquestion.ps1
+```
+
+It asks Claude which tools it advertises and stops with an explanation if
+`AskUserQuestion` is missing (exit 3). If it is present, it drives a real interactive
+session, captures the `PreToolUse` payload Claude actually emits, checks every field
+against the assumed contract, and runs it through the parser — so a drift in field
+names is caught rather than guessed at. Re-run it after any Claude Code upgrade.
 
 **Best-effort:** answering a permission prompt from the reply box. The text is injected
 into Claude's own prompt; whether that prompt accepts typed input depends on the prompt.
@@ -65,9 +80,10 @@ Knowing a session has stopped, and why, works regardless.
 ## Tests
 
 ```powershell
-.\tests\test-claude-ask-parser.ps1   # AskUserQuestion parsing; no Claude or HA needed
-.\tests\test-claude-transcript.ps1   # transcript reducer and tailing reader
-.\tests\test-claude-integration.ps1  # drives the hooks against a real Home Assistant
+.\tests\test-claude-ask-parser.ps1     # AskUserQuestion parsing; no Claude or HA needed
+.\tests\test-claude-transcript.ps1     # transcript reducer and tailing reader
+.\tests\test-claude-integration.ps1    # drives the hooks against a real Home Assistant
+.\tests\verify-askuserquestion.ps1     # live AskUserQuestion check, when the tool exists
 ```
 
 The fixtures in `fixtures/` mirror shapes taken from the shipping tool, including

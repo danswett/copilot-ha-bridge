@@ -122,13 +122,22 @@ function Get-LiveCopilotSessions {
         if ($null -eq $processId) { continue }
 
         $transcript = [IO.Path]::Combine($dir, 'events.jsonl')
-        if (-not [IO.File]::Exists($transcript)) { continue }
+
+        # A session that has not taken its first turn has no transcript yet. It is
+        # still a real, live session, so it is included rather than skipped: the card
+        # shows it as idle and, more usefully, its reply box can start the
+        # conversation from Home Assistant. Streaming begins on its own once the
+        # transcript appears.
+        $hasTranscript = [IO.File]::Exists($transcript)
 
         $candidates += [pscustomobject]@{
             SessionId = [IO.Path]::GetFileName($dir)
             ProcessId = $processId
             Transcript = $transcript
-            LastWrite = [IO.File]::GetLastWriteTimeUtc($transcript)
+            HasTranscript = $hasTranscript
+            # A missing file reports a 1601 sentinel, which naturally loses the
+            # per-pid tie-break below to any session that has actually written one.
+            LastWrite = if ($hasTranscript) { [IO.File]::GetLastWriteTimeUtc($transcript) } else { [DateTime]::MinValue }
             Kind = 'copilot'
         }
     }
@@ -1023,7 +1032,11 @@ function Sync-DaemonSessions {
             }
 
             $entry = [pscustomobject]@{
-                Offset = (Get-Item -LiteralPath $session.Transcript).Length
+                # A session with no transcript yet starts at offset 0, so the first
+                # bytes it writes are picked up rather than skipped.
+                Offset = if ([IO.File]::Exists($session.Transcript)) {
+                    (Get-Item -LiteralPath $session.Transcript).Length
+                } else { 0 }
                 Name = $display.Name
                 Machine = $display.Machine
                 Status = $initialStatus
@@ -1034,6 +1047,31 @@ function Sync-DaemonSessions {
         }
 
         $entryKind = if ($entry.PSObject.Properties.Name -contains 'Kind' -and $entry.Kind) { [string]$entry.Kind } else { 'copilot' }
+
+        # A session published before it wrote its workspace file only had a generic
+        # name to go on. Names are otherwise resolved once, so re-resolve while the
+        # stored one is still the fallback; the real task name usually appears within
+        # a reconcile or two of the session starting.
+        if ([string]$entry.Name -match '^Copilot session [0-9a-f]{8}$') {
+            $workingDirectory = if ($session.PSObject.Properties.Name -contains 'WorkingDirectory' -and $session.WorkingDirectory) {
+                [string]$session.WorkingDirectory
+            } else { 'Unknown folder' }
+            $refreshed = Get-BridgeSessionDisplay -SessionId $id -Kind $entryKind -WorkingDirectory $workingDirectory
+            if ([string]$refreshed.Name -ne [string]$entry.Name) {
+                $entry.Name = $refreshed.Name
+                try {
+                    Set-CopilotMqttStatus -SessionId $id -Status ([string]$entry.Status) -Headers $Headers -Attributes @{
+                        session = $entry.Name
+                        machine = $entry.Machine
+                        process_id = $session.ProcessId
+                        updated = [DateTimeOffset]::Now.ToString('o')
+                    }
+                }
+                catch { }
+                Write-DaemonLog -Message "renamed $($id.Substring(0,8)) to '$($entry.Name)'"
+            }
+        }
+
         $append = Read-BridgeTranscriptAppend -Path $session.Transcript -Offset ([long]$entry.Offset) -Kind $entryKind
         $entry.Offset = $append.Offset
         if ($append.Lines.Count -eq 0) { continue }
@@ -1165,7 +1203,10 @@ function Sync-DaemonSessions {
         Write-DaemonLog -Message "global status publish failed: $($_.Exception.Message)"
     }
 
-    $signature = ($descriptors | ForEach-Object { $_.Node }) -join '|'
+    # The card header carries the session name, so a rename has to rebuild the
+    # dashboard too - a signature of node ids alone would leave a renamed session
+    # showing its old generic title until the set of sessions happened to change.
+    $signature = ($descriptors | ForEach-Object { "$($_.Node)=$($_.Name)" }) -join '|'
     if ($signature -ne $script:DaemonDashboardSignature) {
         try {
             [void](Set-CopilotMqttGlobalEntityId)

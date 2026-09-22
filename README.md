@@ -24,6 +24,7 @@ twice.
 | **Chain-of-thought** | A dashboard toggle streams the model's reasoning into an expander. |
 | **Real forms** | Multi-field questions become one dropdown per field plus a Send button. |
 | **Continuation** | Reply to a finished turn from your phone; it's typed into the session. |
+| **Start a conversation** | A session appears as soon as it opens, so you can send it its first prompt from the dashboard. |
 | **No polling** | State changes arrive over a Home Assistant WebSocket subscription. |
 
 The card glows **blue** while working, **amber** while waiting on you, and not at all
