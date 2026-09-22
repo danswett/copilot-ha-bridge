@@ -1431,6 +1431,70 @@ function Update-SessionsForVerbose {
     }
 }
 
+function Invoke-PendingCodexApprovals {
+    <#
+        Delivers a dashboard answer into a Codex approval prompt.
+
+        Codex runs its PermissionRequest hook before showing its own approval UI, and
+        a hook that writes nothing to stdout returns "no decision", so the terminal
+        prompt appears as usual. That makes the card a second input rather than a
+        replacement: whichever is used first wins, exactly as with Copilot's ask_user.
+
+        The marker written by the hook is the gate. It is removed by the next hook
+        event for that session - a tool starting, or the turn ending - because either
+        proves the prompt is no longer waiting.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][hashtable]$Live
+    )
+
+    if (-not $script:CodexAdapterLoaded) { return }
+
+    foreach ($sessionId in @($Live.Keys)) {
+        $session = $Live[$sessionId]
+        if ([string]$session.Kind -ne 'codex') { continue }
+
+        $marker = Get-CodexApprovalMarker -SessionId $sessionId
+        if ($null -eq $marker) { continue }
+
+        $node = Get-CopilotMqttNodeId -SessionId $sessionId
+        $choice = ''
+        try {
+            $selector = Get-HomeAssistantState -EntityId "select.${node}_decision" -Headers $Headers
+            $choice = [string]$selector.state
+        }
+        catch { continue }
+
+        if ($choice -notin @('Approve', 'Deny')) { continue }
+
+        # Codex's approval prompt is a keyboard UI, so the answer is typed into the
+        # session the same way a reply is. Approve sends y, deny sends n, which is
+        # what its prompt accepts.
+        $keystroke = if ($choice -eq 'Approve') { 'y' } else { 'n' }
+        $short = $sessionId.Substring(0, [Math]::Min(8, $sessionId.Length))
+        $delivery = Send-CopilotSessionPrompt -SessionId $sessionId -Text $keystroke `
+            -ProcessId ([int]$session.ProcessId)
+
+        if ($delivery.Delivered) {
+            Write-DaemonLog -Message "codex approval '$choice' delivered to $short (pid $($delivery.ProcessId))"
+        }
+        else {
+            Write-DaemonLog -Message "codex approval delivery FAILED for $short : $($delivery.Detail)"
+        }
+
+        # Clear either way, so a failed delivery is not resent on every reconcile.
+        # The hook clears the marker itself once the prompt is genuinely answered.
+        try {
+            Clear-CopilotMqttDecision -SessionId $sessionId `
+                -SessionName ([string]$State[$sessionId].Name) `
+                -Machine ([string]$State[$sessionId].Machine) -Headers $Headers
+        }
+        catch { }
+    }
+}
+
 function Invoke-DaemonReply {
     <#
         Delivers a dashboard reply into the running CLI and clears the box.
@@ -1552,6 +1616,7 @@ function Start-BridgeDaemon {
     Repair-CopilotSessionEntities -Headers $headers -State $state -Live $live
     Invoke-PendingDecisions -Headers $headers -State $state -Live $live
     Invoke-PendingReplies -Headers $headers -State $state -Live $live
+    Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
     Sync-DaemonUpdateStatus -Headers $headers
     Write-DaemonState -State $state
 
@@ -1609,6 +1674,7 @@ function Start-BridgeDaemon {
                 Repair-CopilotSessionEntities -Headers $headers -State $state -Live $live
                 Invoke-PendingDecisions -Headers $headers -State $state -Live $live
                 Invoke-PendingReplies -Headers $headers -State $state -Live $live
+                Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
                 Sync-DaemonUpdateStatus -Headers $headers
                 Write-DaemonState -State $state
             }

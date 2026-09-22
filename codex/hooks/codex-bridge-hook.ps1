@@ -52,6 +52,7 @@ try {
     $status = ''
     $activity = ''
     $response = ''
+    $pendingApproval = $false
     switch ($eventName) {
         'SessionStart' { $status = 'idle'; $activity = 'Session started' }
         'UserPromptSubmit' {
@@ -59,6 +60,23 @@ try {
             $prompt = Get-EventField 'prompt'
             if ($prompt.Length -gt 160) { $prompt = $prompt.Substring(0, 157) + '...' }
             $activity = if ($prompt) { "Prompt: $prompt" } else { 'Working' }
+        }
+        'PermissionRequest' {
+            # Codex runs this before showing its own approval UI, and an empty stdout
+            # means "no decision", so the terminal prompt still appears. The card is
+            # therefore a second way to answer rather than a replacement, which is the
+            # same dual-input arrangement the Copilot bridge uses for ask_user.
+            $status = 'waiting'
+            $pendingApproval = $true
+            $tool = Get-EventField 'tool_name'
+            $activity = "Needs approval: $tool"
+            if ($event.PSObject.Properties.Name -contains 'tool_input' -and
+                $event.tool_input -and
+                $event.tool_input.PSObject.Properties.Name -contains 'command') {
+                $command = [string]$event.tool_input.command
+                if ($command.Length -gt 300) { $command = $command.Substring(0, 297) + '...' }
+                if ($command) { $activity = "Needs approval: $command" }
+            }
         }
         'PreToolUse' {
             $status = 'working'
@@ -148,6 +166,34 @@ try {
     if ($activity) {
         Set-CopilotMqttActivity -SessionId $sessionId -Summary $activity `
             -Detail @{ session = $display.Name; machine = $display.Machine } -Headers $headers
+    }
+
+    if ($pendingApproval) {
+        # Arm the selector so the command can be approved from the dashboard. The
+        # marker is the daemon's gate: while it exists, an answer on the card is
+        # delivered into the session's own approval prompt.
+        $decisionId = "$node-$([DateTimeOffset]::Now.ToUnixTimeMilliseconds())"
+        $question = $activity
+        $choices = @('Approve', 'Deny')
+        Set-CopilotMqttDecision -SessionId $sessionId -SessionName $display.Name `
+            -Machine $display.Machine -Question $question -Choices $choices `
+            -Fields @() -DecisionId $decisionId -Headers $headers | Out-Null
+        Write-CodexApprovalMarker -SessionId $sessionId -DecisionId $decisionId -Question $question
+
+        $title = "Approval needed: $($display.Name)"
+        if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
+        Send-BridgeNotification -Title $title -Message $question -Headers $headers
+    }
+    elseif ($eventName -in @('PreToolUse', 'Stop')) {
+        # Whatever was awaiting approval has been answered - in the terminal or on the
+        # dashboard - because the tool is now running or the turn has finished.
+        if (Remove-CodexApprovalMarker -SessionId $sessionId) {
+            try {
+                Clear-CopilotMqttDecision -SessionId $sessionId -SessionName $display.Name `
+                    -Machine $display.Machine -Headers $headers
+            }
+            catch { }
+        }
     }
 
     if ($eventName -eq 'Stop' -and $response) {

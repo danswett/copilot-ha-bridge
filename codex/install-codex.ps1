@@ -115,7 +115,10 @@ $command = "pwsh -NoProfile -ExecutionPolicy Bypass -File $hookScript"
 
 $events = [ordered]@{}
 # SessionEnd is clamped to a 3 second timeout by Codex, which the hook accounts for.
-foreach ($eventName in @('SessionStart', 'UserPromptSubmit', 'PreToolUse', 'Stop', 'SessionEnd')) {
+# PermissionRequest runs before Codex shows its own approval UI; the hook writes
+# nothing to stdout, which Codex reads as "no decision", so the terminal prompt still
+# appears and the dashboard becomes a second way to answer rather than a replacement.
+foreach ($eventName in @('SessionStart', 'UserPromptSubmit', 'PermissionRequest', 'PreToolUse', 'Stop', 'SessionEnd')) {
     $events[$eventName] = @(
         [ordered]@{ hooks = @([ordered]@{ type = 'command'; command = $command; timeout = 20 }) }
     )

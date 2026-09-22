@@ -225,6 +225,51 @@ function Remove-CodexSessionRegistration {
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
 
+function Get-CodexApprovalMarkerPath {
+    param([Parameter(Mandatory)][string]$SessionId)
+    Join-Path (Get-CodexStateRoot) ((Get-CodexSafeSessionKey -SessionId $SessionId) + '.approval.json')
+}
+
+function Write-CodexApprovalMarker {
+    <#
+        Records that a command is waiting for approval.
+
+        This is the daemon's gate, the same role the pending-decision marker plays for
+        Copilot's ask_user: while it exists, an answer on the dashboard is delivered
+        into the session's own approval prompt. It is removed as soon as any later
+        event proves the prompt was answered, whichever way it was answered.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [Parameter(Mandatory)][string]$DecisionId,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Question
+    )
+
+    [pscustomobject]@{
+        SessionId  = $SessionId
+        DecisionId = $DecisionId
+        Question   = $Question
+        Created    = [DateTimeOffset]::Now.ToString('o')
+    } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Get-CodexApprovalMarkerPath -SessionId $SessionId) -Encoding UTF8
+}
+
+function Get-CodexApprovalMarker {
+    param([Parameter(Mandatory)][string]$SessionId)
+    $path = Get-CodexApprovalMarkerPath -SessionId $SessionId
+    if (-not (Test-Path -LiteralPath $path)) { return $null }
+    try { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { $null }
+}
+
+function Remove-CodexApprovalMarker {
+    <# Returns $true when a marker was actually removed, so callers can tell whether
+       there was anything pending. #>
+    param([Parameter(Mandatory)][string]$SessionId)
+    $path = Get-CodexApprovalMarkerPath -SessionId $SessionId
+    if (-not (Test-Path -LiteralPath $path)) { return $false }
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
 function Get-CodexHookEvent {
     <# Reads the hook event from stdin, returning $null when nothing usable arrives. #>
     param([string]$Raw)
