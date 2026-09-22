@@ -36,6 +36,7 @@ import {
   setStatus,
 } from './entities.js';
 import { describeSchema, outlineFor, valueForLabel } from './schema.js';
+import { DEFAULT_URL_PATH, ensureDashboard, removeFromDashboard } from './dashboard.js';
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -52,6 +53,9 @@ function loadConfig() {
     token,
     title: process.env.HA_CARD_TITLE || 'Copilot MCP',
     timeoutMs: Number(process.env.HA_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS,
+    // Set HA_DASHBOARD='' to manage cards yourself.
+    dashboard:
+      process.env.HA_DASHBOARD === undefined ? DEFAULT_URL_PATH : process.env.HA_DASHBOARD,
   };
 }
 
@@ -107,6 +111,13 @@ async function main() {
     // can be renamed.
     await new Promise((resolve) => setTimeout(resolve, 2000));
     await reconcileEntityIds(ha, node);
+    // An MCP-only install has no daemon to build a dashboard, so the server makes a
+    // small one of its own. Never fatal: the entities are useful regardless.
+    if (config.dashboard) {
+      await ensureDashboard(ha, node, config.title, config.dashboard).catch((error) => {
+        process.stderr.write(`[dashboard] ${error.message}\n`);
+      });
+    }
     provisioned = true;
     return true;
   };
@@ -226,7 +237,10 @@ async function main() {
   });
 
   const shutdown = async () => {
-    if (provisioned) await removeEntities(ha, node).catch(() => {});
+    if (provisioned) {
+      if (config.dashboard) await removeFromDashboard(ha, node, config.dashboard).catch(() => {});
+      await removeEntities(ha, node).catch(() => {});
+    }
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

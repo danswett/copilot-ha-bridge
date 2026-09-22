@@ -169,11 +169,94 @@ async function testHomeAssistantWins() {
   }
 }
 
+/** Minimal authenticated WebSocket round-trip, for the Lovelace config API. */
+async function haSocketSend(payload) {
+  const socket = new WebSocket(`${baseUrl.replace(/^http/, 'ws')}/api/websocket`);
+  try {
+    return await new Promise((resolve, reject) => {
+      socket.addEventListener('error', () => reject(new Error('socket error')), { once: true });
+      socket.addEventListener('message', (event) => {
+        const message = JSON.parse(event.data);
+        if (message.type === 'auth_required') {
+          socket.send(JSON.stringify({ type: 'auth', access_token: token }));
+        } else if (message.type === 'auth_ok') {
+          socket.send(JSON.stringify({ ...payload, id: 1 }));
+        } else if (message.type === 'result') {
+          resolve(message);
+        }
+      });
+    });
+  } finally {
+    socket.close();
+  }
+}
+
+async function testDashboard() {
+  console.log('--- MCP-only dashboard ---');
+  const decisionsBefore = await haSocketSend({
+    type: 'lovelace/config',
+    url_path: 'copilot-decisions',
+  });
+
+  let node = null;
+  const client = await connect({
+    onElicit: async (_request, extra) =>
+      new Promise((_resolve, reject) =>
+        extra.signal.addEventListener('abort', () => reject(new Error('cancelled')), { once: true }),
+      ),
+  });
+
+  try {
+    const pending = client.callTool({ name: 'ask_via_home_assistant', arguments: QUESTION });
+    for (let attempt = 0; attempt < 30 && !node; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+      const states = await haFetch('/api/states');
+      const armed = states.find(
+        (s) => /^select\.mcp_.*_decision$/.test(s.entity_id) && s.attributes?.options?.includes('ship'),
+      );
+      if (armed) node = armed.entity_id.replace(/^select\./, '').replace(/_decision$/, '');
+    }
+    check('the card armed', Boolean(node), node ?? 'not found');
+
+    const mcp = await haSocketSend({ type: 'lovelace/config', url_path: 'copilot-mcp' });
+    const cards = mcp.result?.views?.[0]?.cards ?? [];
+    check('an MCP-only dashboard was created', mcp.success === true);
+    check('it has a card for this client',
+      cards.some((card) => JSON.stringify(card).includes(`${node}_decision`)),
+      `${cards.length} card(s)`);
+
+    // The PowerShell daemon owns copilot-decisions; the MCP server must never touch it.
+    const decisionsAfter = await haSocketSend({
+      type: 'lovelace/config',
+      url_path: 'copilot-decisions',
+    });
+    check('copilot-decisions was left alone',
+      JSON.stringify(decisionsBefore.result) === JSON.stringify(decisionsAfter.result));
+
+    await haFetch('/api/services/select/select_option', {
+      method: 'POST',
+      body: JSON.stringify({ entity_id: `select.${node}_decision`, option: 'ship' }),
+    });
+    await pending;
+  } finally {
+    await client.close();
+  }
+
+  // The card should be withdrawn when the client disconnects.
+  await new Promise((resolve) => setTimeout(resolve, 4000));
+  const cleaned = await haSocketSend({ type: 'lovelace/config', url_path: 'copilot-mcp' });
+  const remaining = cleaned.result?.views?.[0]?.cards ?? [];
+  check('the card was removed on shutdown',
+    !remaining.some((card) => JSON.stringify(card).includes(`${node}_decision`)),
+    `${remaining.length} card(s) left`);
+}
+
 async function main() {
   console.log(`Running against ${baseUrl}`);
   await testToolIsAdvertised();
   await testApplicationWins();
   await testHomeAssistantWins();
+  await testDashboard();
 
   console.log('');
   console.log(failures ? `${failures} check(s) failed` : 'All checks passed');
