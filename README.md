@@ -142,6 +142,8 @@ never in the repo). See [`config.example.json`](config.example.json).
 | `dashboard.urlPath` | Lovelace dashboard slug (default `copilot-decisions`) |
 | `notifications.enabled` / `.service` | Optional notify-style service |
 | `copilot.sessionStateRoot` | Override session-state location if not `~/.copilot/session-state` |
+| `updates.repository` | Repository to check for releases (default `danswett/copilot-ha-bridge`) |
+| `updates.checkForUpdates` | Set to `false` to disable the daily update check |
 
 Prefer keeping the token out of a file? Leave `token` empty and set `COPILOT_HA_TOKEN`
 in your environment.
@@ -177,6 +179,30 @@ dashboard view.
 
 ---
 
+## Updating
+
+The daemon asks GitHub for the newest release once a day and publishes the result as
+a Home Assistant **update entity**, so a new version shows up on the dashboard and in
+Home Assistant's own Updates list — with the release notes and a one-press **Install
+now** button.
+
+From a terminal:
+
+```powershell
+.\update.ps1 -Check     # report what's available
+.\update.ps1            # install it, after confirming
+```
+
+Either way your configuration is preserved: the installer reads the existing config,
+backs it up, and keeps your URL, token and settings.
+
+**Nothing updates itself.** The check is passive and installing is always a deliberate
+action, because this software types into terminals and registers scheduled tasks. Set
+`updates.checkForUpdates` to `false` to turn the check off entirely, or point
+`updates.repository` at your own fork.
+
+---
+
 ## Uninstall
 
 From **Settings → Apps → Installed apps**, or:
@@ -198,6 +224,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-decision-retry.ps1   # HTTP retry / transient-failure classification
 .\tests\test-security.ps1         # template injection, path and topic safety, token handling
 .\tests\test-reliability.ps1      # request budget, StrictMode safety, stale-state pruning
+.\tests\test-update.ps1           # version comparison, release cache, failure safety
 ```
 
 Both are plain PowerShell, need no Home Assistant, and run in a couple of seconds.

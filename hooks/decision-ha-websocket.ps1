@@ -469,8 +469,24 @@ function Save-CopilotSessionDashboard {
         )
     }
 
+    # The update row and its install button only appear when an update exists. A
+    # conditional card is used rather than hiding rows inside the entities card,
+    # because an entities row has no condition of its own.
+    $updateCard = @{
+        type = 'conditional'
+        conditions = @(@{ entity = 'update.copilot_cli_update'; state = 'on' })
+        card = @{
+            type = 'entities'
+            title = 'Bridge update available'
+            entities = @(
+                @{ entity = 'update.copilot_cli_update'; name = 'Version' }
+                @{ entity = 'button.copilot_cli_install_update'; name = 'Install now' }
+            )
+        }
+    }
+
     # The control panel is a plain card pair at the top of the masonry flow.
-    $controlCards = @($controlMarkdown, $toggleCard)
+    $controlCards = @($controlMarkdown, $toggleCard, $updateCard)
 
     $sessionSections = foreach ($session in $Sessions) {
         $node = $session.Node

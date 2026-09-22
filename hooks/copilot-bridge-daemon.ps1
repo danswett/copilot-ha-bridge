@@ -65,6 +65,9 @@ $script:DaemonDashboardSignature = $null
 $script:DaemonUpdateAvailable = $false
 $script:DaemonUpdatePublished = $false
 $script:DaemonUpdateLastPress = ''
+# Anything the dashboard reports as happening before this is a leftover from a
+# previous run rather than something the user just did.
+$script:DaemonStartedAt = [DateTimeOffset]::Now
 
 function Write-DaemonLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -934,6 +937,10 @@ function Sync-DaemonUpdateStatus {
     #>
     param([Parameter(Mandatory)][hashtable]$Headers)
 
+    # Opting out has to stop the network call, not just hide the result, so this is
+    # checked before anything else happens.
+    if (-not (Get-BridgeSetting 'updates.checkForUpdates' $true)) { return }
+
     try {
         $status = Get-BridgeUpdateStatus
         $latest = if ($status.Available) { $status.Latest } else { $status.Installed }
@@ -956,19 +963,21 @@ function Sync-DaemonUpdateStatus {
         return
     }
 
-    # The install button is a press timestamp, like the per-session Submit button:
-    # only a press newer than the last one seen counts, so a retained value cannot
-    # trigger an update on every reconcile or after a restart.
+    # The install button is a press timestamp, like the per-session Submit button.
+    # A press from before this daemon started is history - a retained value from an
+    # earlier run - while anything newer is a real instruction. Comparing against the
+    # start time rather than simply ignoring the first value seen means a press made
+    # moments after a restart still counts, instead of being silently swallowed.
     try {
         $button = Get-HomeAssistantState -EntityId 'button.copilot_cli_install_update' -Headers $Headers
         $press = [string]$button.state
         if ($press -in @('unknown', 'unavailable', '')) { return }
         if ($press -eq $script:DaemonUpdateLastPress) { return }
-
-        $firstSeen = [string]::IsNullOrEmpty($script:DaemonUpdateLastPress)
         $script:DaemonUpdateLastPress = $press
-        # A press from before this daemon started is history, not an instruction.
-        if ($firstSeen) { return }
+
+        $pressedAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse($press, [ref]$pressedAt)) { return }
+        if ($pressedAt -le $script:DaemonStartedAt) { return }
 
         Write-DaemonLog -Message 'install update requested from Home Assistant'
         $result = Invoke-BridgeSelfUpdate -Detached

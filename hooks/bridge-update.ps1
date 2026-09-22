@@ -216,6 +216,9 @@ finally {
         return [pscustomobject]@{ Started = $true; Detail = "updating to $($status.Latest) in the background" }
     }
 
-    & (Get-Command pwsh).Source -NoProfile -ExecutionPolicy Bypass -File $script
+    # The child's own output would otherwise be returned alongside the result object,
+    # leaving callers with an array instead of the object they expect. The updater
+    # writes its progress to copilot-bridge-update.log, so nothing is lost.
+    & (Get-Command pwsh).Source -NoProfile -ExecutionPolicy Bypass -File $script *>&1 | Out-Null
     [pscustomobject]@{ Started = $true; Detail = "updated to $($status.Latest)" }
 }
