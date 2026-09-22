@@ -93,8 +93,27 @@ Note that `PermissionRequest` only fires in an interactive session. `codex exec`
 reports `approval: never` regardless of `approval_policy`, because it has no way to
 ask.
 
-**Chain-of-thought is not streamed yet.** The hooks carry activity but not reasoning;
-that lives in the rollout transcript and needs a reducer. Tracked separately.
+**Chain-of-thought is wired but unproven.** The reducer reads the rollout transcript
+for `Reasoning` items, gated on the same **Live Verbose** toggle as the other
+adapters. It is written to the contract in codex-rs — `ThreadItemDetails` declares a
+`Reasoning` variant holding `{ text }` — and covered by tests.
+
+It has never produced anything, because no model has been observed emitting one:
+across 26 real rollouts, including runs with `model_reasoning_effort=high` and
+`model_reasoning_summary=detailed`, only `AgentMessage`, `UserMessage` and
+`CommandExecution` ever appeared. If reasoning starts being emitted it will show up;
+until then the card is unchanged. The distinction between *implemented* and
+*observed* is deliberate, and the test suite says so too.
+
+## Tests
+
+```powershell
+.\tests\test-codex.ps1
+```
+
+Covers hook parsing against the real captured payloads, session naming, path safety,
+approval markers, and the rollout reducer. Needs no Home Assistant and no Codex
+session.
 
 ## Uninstall
 

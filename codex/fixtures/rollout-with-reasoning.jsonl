@@ -1,0 +1,9 @@
+{"timestamp":"2026-09-22T22:10:00.000Z","ordinal":0,"type":"session_meta","payload":{"session_id":"01a0cb31-0000-7000-8000-000000000001","cwd":"C:\\repo","originator":"codex_exec","cli_version":"0.155.0-alpha.6","source":"exec"}}
+{"timestamp":"2026-09-22T22:10:01.000Z","ordinal":1,"type":"event_msg","payload":{"type":"task_started"}}
+{"timestamp":"2026-09-22T22:10:02.000Z","ordinal":2,"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a0cb31-0000-7000-8000-000000000001","turn_id":"t1","item":{"type":"UserMessage","id":"u1","content":[{"type":"text","text":"What is 17 times 23?"}]}}}
+{"timestamp":"2026-09-22T22:10:03.000Z","ordinal":3,"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a0cb31-0000-7000-8000-000000000001","turn_id":"t1","item":{"type":"Reasoning","id":"r1","text":"Break it up: 17 x 20 = 340, then 17 x 3 = 51, so 391."}}}
+{"timestamp":"2026-09-22T22:10:04.000Z","ordinal":4,"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a0cb31-0000-7000-8000-000000000001","turn_id":"t1","item":{"type":"CommandExecution","id":"c1","command":"echo hi","aggregated_output":"hi","exit_code":0,"status":"completed"}}}
+{"timestamp":"2026-09-22T22:10:05.000Z","ordinal":5,"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a0cb31-0000-7000-8000-000000000001","turn_id":"t1","item":{"type":"Reasoning","id":"r2","text":"Double-checked the arithmetic."}}}
+{"timestamp":"2026-09-22T22:10:06.000Z","ordinal":6,"type":"event_msg","payload":{"type":"item_completed","thread_id":"01a0cb31-0000-7000-8000-000000000001","turn_id":"t1","item":{"type":"AgentMessage","id":"a1","content":[{"type":"Text","text":"17 x 23 = 391."}]}}}
+{"timestamp":"2026-09-22T22:10:07.000Z","ordinal":7,"type":"event_msg","payload":{"type":"task_complete"}}
+{"timestamp":"2026-09-22T22:10:08.000Z","ordinal":8,"type":"token_usage_record","payload":{"input_tokens":100,"output_tokens":20}}

@@ -191,6 +191,7 @@ $codexHooks = Join-Path $HOME '.copilot\codex-bridge\plugins\copilot-ha-bridge\h
 if (Test-Path -LiteralPath (Join-Path $codexHooks 'codex-session.ps1')) {
     try {
         . (Join-Path $codexHooks 'codex-session.ps1')
+        . (Join-Path $codexHooks 'codex-transcript.ps1')
         $script:CodexAdapterLoaded = $true
     }
     catch {
@@ -1178,9 +1179,39 @@ function Sync-DaemonSessions {
         }
 
         $entryKind = if ($entry.PSObject.Properties.Name -contains 'Kind' -and $entry.Kind) { [string]$entry.Kind } else { 'copilot' }
-        # Codex publishes its own activity from its hooks, so there is no transcript
-        # to tail and nothing to reduce.
-        if ($entryKind -eq 'codex') { continue }
+        # Codex publishes its own status, activity and response from its hooks, which
+        # report them sooner than a transcript tail could. The rollout is read for one
+        # thing only - reasoning - and only while verbose streaming is on.
+        if ($entryKind -eq 'codex') {
+            if (-not $verbose) { continue }
+            $append = Read-CodexTranscriptAppend -Path ([string]$session.Transcript) `
+                -Offset ([long]$entry.Offset) -MaxTailBytes $script:DaemonConfig.MaxTailBytes
+            $entry.Offset = $append.Offset
+            if ($append.Lines.Count -eq 0) { continue }
+
+            $reasoning = Get-CodexReasoningFromTranscript -Lines $append.Lines
+            if (-not [string]::IsNullOrWhiteSpace($reasoning)) {
+                $capped = $reasoning
+                if ($capped.Length -gt $script:DaemonConfig.ReasoningMaxChars) {
+                    $capped = $capped.Substring(0, $script:DaemonConfig.ReasoningMaxChars).TrimEnd() + '…'
+                }
+                try {
+                    # The activity label itself still comes from the hooks; this only
+                    # adds the reasoning attribute the card's expander reads.
+                    Set-CopilotMqttActivity -SessionId $id `
+                        -Summary $(if ($session.PSObject.Properties.Name -contains 'Activity' -and $session.Activity) { [string]$session.Activity } else { 'Working' }) `
+                        -Detail @{
+                            session   = $entry.Name
+                            machine   = $entry.Machine
+                            reasoning = $capped
+                        } -Headers $Headers
+                }
+                catch {
+                    Write-DaemonLog -Message "codex reasoning publish failed for $id : $($_.Exception.Message)"
+                }
+            }
+            continue
+        }
 
         # A session published before it wrote its workspace file only had a generic
         # name to go on. Names are otherwise resolved once, so re-resolve while the
