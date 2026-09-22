@@ -1,0 +1,15 @@
+# Local configuration and anything derived from it. The config file holds a Home
+# Assistant long-lived access token and must never be committed.
+config.json
+copilot-ha-bridge.config.json
+*.local.json
+
+# Logs and runtime state
+*.log
+copilot-bridge-daemon-state.json
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

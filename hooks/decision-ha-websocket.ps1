@@ -1,0 +1,634 @@
+<#
+    Home Assistant WebSocket helpers for the Copilot CLI bridge.
+
+    Kept separate from the dashboard builder because that script runs its rebuild on
+    load, so it cannot be dot-sourced just to reuse its socket code.
+#>
+
+function Invoke-CopilotHaWebSocket {
+    <#
+        Runs a list of WebSocket commands against Home Assistant and returns one
+        result per command, in order.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [hashtable[]]$Commands,
+
+        [int]$TimeoutSeconds = 60
+    )
+    # Same token resolution as the REST helpers: config file, then environment.
+    $token = (Get-HomeAssistantHeaders).Authorization -replace '^Bearer ', ''
+
+    $wsUri = [Uri](
+        ($script:DecisionBridgeConfig.HomeAssistantBaseUrl -replace '^http', 'ws').TrimEnd('/') +
+        '/api/websocket'
+    )
+
+    $socket = [Net.WebSockets.ClientWebSocket]::new()
+    $cancel = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds))
+    $results = @()
+    try {
+        [void]$socket.ConnectAsync($wsUri, $cancel.Token).GetAwaiter().GetResult()
+
+        $receive = {
+            $buffer = [ArraySegment[byte]]::new([byte[]]::new(65536))
+            $text = [Text.StringBuilder]::new()
+            do {
+                $result = $socket.ReceiveAsync($buffer, $cancel.Token).GetAwaiter().GetResult()
+                [void]$text.Append(
+                    [Text.Encoding]::UTF8.GetString($buffer.Array, 0, $result.Count)
+                )
+            } while (-not $result.EndOfMessage)
+            $text.ToString() | ConvertFrom-Json
+        }
+
+        $send = {
+            param($payload)
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 40 -Compress))
+            [void]$socket.SendAsync(
+                [ArraySegment[byte]]::new($bytes),
+                [Net.WebSockets.WebSocketMessageType]::Text, $true, $cancel.Token
+            ).GetAwaiter().GetResult()
+        }
+
+        $hello = & $receive
+        if ($hello.type -ne 'auth_required') {
+            throw "Unexpected Home Assistant WebSocket greeting: $($hello.type)"
+        }
+        & $send @{ type = 'auth'; access_token = $token }
+        $auth = & $receive
+        if ($auth.type -ne 'auth_ok') {
+            throw 'Home Assistant WebSocket authentication failed.'
+        }
+
+        $id = 0
+        foreach ($command in $Commands) {
+            $id++
+            $command['id'] = $id
+            & $send $command
+            $reply = & $receive
+            while ($reply.type -ne 'result' -or $reply.id -ne $id) {
+                $reply = & $receive
+            }
+            if (-not $reply.success) {
+                throw "WebSocket command '$($command.type)' failed: $($reply.error | ConvertTo-Json -Compress)"
+            }
+            $results += , $reply.result
+        }
+    }
+    finally {
+        if ($socket.State -eq [Net.WebSockets.WebSocketState]::Open) {
+            try {
+                [void]$socket.CloseAsync(
+                    [Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'done', $cancel.Token
+                ).GetAwaiter().GetResult()
+            }
+            catch {
+                # A close failure does not invalidate results already received.
+            }
+        }
+        $socket.Dispose()
+        $cancel.Dispose()
+    }
+
+    # -NoEnumerate keeps the outer result array intact. Without it PowerShell unrolls
+    # it, so a single command returning a list (for example the entity registry)
+    # comes back as thousands of top-level items and indexing [0] yields one entry
+    # rather than the list.
+    Write-Output -NoEnumerate $results
+}
+
+function Wait-CopilotHaStateChange {
+    <#
+        Blocks until one of the watched entities changes to a state other than the
+        ignored placeholders, and returns that entity id and state.
+
+        This uses a server-side state trigger scoped to the watched entities, so Home
+        Assistant only sends a message when one of them actually changes. An earlier
+        version subscribed to every `state_changed` event and filtered client side,
+        which on this instance meant decoding hundreds of unrelated MQTT sensor
+        updates per second and burned the CPU. The trigger form sits genuinely idle
+        between hits.
+
+        Returns $null on timeout. A dropped socket also returns $null so the caller
+        can decide whether to reconnect rather than having the failure thrown into
+        the middle of a decision wait.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$EntityIds,
+
+        [Parameter(Mandatory)]
+        [int]$TimeoutSeconds,
+
+        [string[]]$IgnoreStates = @('unknown', 'unavailable', '')
+    )
+    # Same token resolution as the REST helpers: config file, then environment.
+    $token = (Get-HomeAssistantHeaders).Authorization -replace '^Bearer ', ''
+    $wsUri = [Uri](
+        ($script:DecisionBridgeConfig.HomeAssistantBaseUrl -replace '^http', 'ws').TrimEnd('/') +
+        '/api/websocket'
+    )
+
+    $socket = [Net.WebSockets.ClientWebSocket]::new()
+    $cancel = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($TimeoutSeconds + 15))
+    $deadline = [DateTimeOffset]::Now.AddSeconds($TimeoutSeconds)
+
+    try {
+        [void]$socket.ConnectAsync($wsUri, $cancel.Token).GetAwaiter().GetResult()
+
+        $receive = {
+            param([int]$WaitSeconds)
+            $buffer = [ArraySegment[byte]]::new([byte[]]::new(65536))
+            $text = [Text.StringBuilder]::new()
+            $perCall = [Threading.CancellationTokenSource]::new([TimeSpan]::FromSeconds($WaitSeconds))
+            try {
+                do {
+                    $result = $socket.ReceiveAsync($buffer, $perCall.Token).GetAwaiter().GetResult()
+                    [void]$text.Append(
+                        [Text.Encoding]::UTF8.GetString($buffer.Array, 0, $result.Count)
+                    )
+                } while (-not $result.EndOfMessage)
+            }
+            finally {
+                $perCall.Dispose()
+            }
+            $text.ToString() | ConvertFrom-Json
+        }
+
+        $send = {
+            param($payload)
+            $bytes = [Text.Encoding]::UTF8.GetBytes(($payload | ConvertTo-Json -Depth 40 -Compress))
+            [void]$socket.SendAsync(
+                [ArraySegment[byte]]::new($bytes),
+                [Net.WebSockets.WebSocketMessageType]::Text, $true, $cancel.Token
+            ).GetAwaiter().GetResult()
+        }
+
+        $hello = & $receive 30
+        if ($hello.type -ne 'auth_required') {
+            throw "Unexpected Home Assistant WebSocket greeting: $($hello.type)"
+        }
+        & $send @{ type = 'auth'; access_token = $token }
+        $auth = & $receive 30
+        if ($auth.type -ne 'auth_ok') {
+            throw 'Home Assistant WebSocket authentication failed.'
+        }
+
+        & $send @{
+            type = 'subscribe_trigger'
+            id = 1
+            trigger = @{ platform = 'state'; entity_id = @($EntityIds) }
+        }
+        [void](& $receive 30)
+
+        while ([DateTimeOffset]::Now -lt $deadline) {
+            $remaining = [int]([Math]::Max(1, ($deadline - [DateTimeOffset]::Now).TotalSeconds))
+            $slice = [Math]::Min(30, $remaining)
+
+            try {
+                $message = & $receive $slice
+            }
+            catch {
+                # No trigger fired in this window. With a scoped trigger this is the
+                # normal idle path, not an error.
+                if ($socket.State -ne [Net.WebSockets.WebSocketState]::Open) { return $null }
+                continue
+            }
+
+            if ($message.type -ne 'event') { continue }
+            $trigger = $message.event.variables.trigger
+            $entityId = [string]$trigger.entity_id
+            if ([string]::IsNullOrWhiteSpace($entityId)) { continue }
+
+            $newState = [string]$trigger.to_state.state
+            if ($IgnoreStates -contains $newState) { continue }
+
+            return [pscustomobject]@{
+                EntityId = $entityId
+                State = $newState
+                Attributes = $trigger.to_state.attributes
+            }
+        }
+
+        $null
+    }
+    finally {
+        if ($socket.State -eq [Net.WebSockets.WebSocketState]::Open) {
+            try {
+                [void]$socket.CloseAsync(
+                    [Net.WebSockets.WebSocketCloseStatus]::NormalClosure, 'done', $cancel.Token
+                ).GetAwaiter().GetResult()
+            }
+            catch {
+                # Closing is best effort.
+            }
+        }
+        $socket.Dispose()
+        $cancel.Dispose()
+    }
+}
+
+function Resolve-CopilotMqttEntityIds {
+    <#
+        Maps the bridge's MQTT unique_ids to the entity_ids Home Assistant actually
+        assigned.
+
+        Home Assistant derives an MQTT entity_id from the device name plus the entity
+        name and ignores `object_id`, so a session named "Bridge Test" produced
+        `select.copilot_bridge_test_decision` rather than the node-based id the bridge
+        predicted. Predicting the id from the session name would break the moment a
+        session is renamed, so the registry is the source of truth.
+
+        Returns a hashtable keyed Decision/Reply/Status/Activity. Missing entries mean
+        discovery has not registered yet.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$SessionId
+    )
+
+    $node = Get-CopilotMqttNodeId -SessionId $SessionId
+    $wanted = @{
+        "${node}_decision" = 'Decision'
+        "${node}_reply" = 'Reply'
+        "${node}_status" = 'Status'
+        "${node}_activity" = 'Activity'
+    }
+    for ($i = 1; $i -le 4; $i++) { $wanted["${node}_f$i"] = "Field$i" }
+    $wanted["${node}_submit"] = 'Submit'
+
+    $registry = @(
+        (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
+    )
+
+    $map = @{}
+    foreach ($entry in $registry) {
+        $uniqueId = [string]$entry.unique_id
+        if ($wanted.ContainsKey($uniqueId)) {
+            $map[$wanted[$uniqueId]] = [string]$entry.entity_id
+        }
+    }
+
+    $map
+}
+
+function Set-CopilotMqttGlobalEntityId {
+    <#
+        Forces the global session-count sensor onto its deterministic id. Home
+        Assistant derives the id from device+entity name, so the sensor first appears
+        as sensor.copilot_cli_bridge_copilot_sessions; rename it once so the dashboard
+        and any templates can rely on sensor.copilot_cli_sessions.
+    #>
+    $target = 'sensor.copilot_cli_sessions'
+    $reg = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
+    $entry = @($reg) | Where-Object { $_.unique_id -eq 'copilot_cli_sessions' } | Select-Object -First 1
+    if ($null -eq $entry) { return $false }
+    if ([string]$entry.entity_id -eq $target) { return $true }
+
+    [void](Invoke-CopilotHaWebSocket -Commands @(@{
+        type = 'config/entity_registry/update'
+        entity_id = [string]$entry.entity_id
+        new_entity_id = $target
+    }))
+    $true
+}
+
+function Save-CopilotSessionDashboard {
+    <#
+        Regenerates the copilot-decisions dashboard for the per-session MQTT model.
+
+        The dashboard is fully generated from the live session list, so it is rebuilt
+        whenever a session appears or exits rather than hand-edited. It has a control
+        section (the live-session count sensor and the chain-of-thought toggle) and one
+        card per live session showing status, activity, the decision selector and the
+        reply box.
+
+        Live count and pending-decision count are rendered as Jinja templates over the
+        exact entity ids, so they stay current between rebuilds as turn state and
+        armed questions change.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Sessions,
+
+        [string]$VerboseToggle = 'input_boolean.copilot_cli_live_verbose'
+    )
+
+    $decisionEntities = @($Sessions | ForEach-Object { "select.$($_.Node)_decision" })
+    $decisionList = ($decisionEntities | ForEach-Object { "'$_'" }) -join ','
+
+    $liveTemplate = "{{ states('sensor.copilot_cli_sessions') }}"
+    $pendingTemplate = "{% set dc = [$decisionList] %}{{ dc | map('states') | reject('in',['Idle','unavailable','unknown','']) | list | count }}"
+
+    $controlMarkdown = @{
+        type = 'markdown'
+        content = @(
+            '## Copilot CLI sessions'
+            ''
+            "**Live sessions:** $liveTemplate &bull; **Pending decisions:** $pendingTemplate"
+            ''
+            'Turn on *Live Verbose* to stream each session''s reasoning and every tool call.'
+        ) -join "`n"
+    }
+
+    $toggleCard = @{
+        type = 'entities'
+        entities = @(
+            @{ entity = $VerboseToggle; name = 'Live Verbose (chain-of-thought)' }
+            @{ entity = 'sensor.copilot_cli_sessions'; name = 'Live session count' }
+        )
+    }
+
+    # The control panel is a plain card pair at the top of the masonry flow.
+    $controlCards = @($controlMarkdown, $toggleCard)
+
+    $sessionSections = foreach ($session in $Sessions) {
+        $node = $session.Node
+        $statusEntity = "sensor.${node}_status"
+        $activityEntity = "sensor.${node}_activity"
+        $decisionEntity = "select.${node}_decision"
+        $replyEntity = "text.${node}_reply"
+
+        # Three visual states, driven by card-mod:
+        #   waiting for an answer -> amber, pulsing (a question is armed)
+        #   working               -> blue, pulsing
+        #   idle / turn finished  -> no glow at all
+        # "Waiting" is checked first because an armed ask_user happens mid-turn, so the
+        # session is still 'working' underneath and would otherwise show blue.
+        $headerStyle = @"
+ha-card {
+  {% if state_attr('$decisionEntity','question') %}
+  border: 1px solid var(--warning-color);
+  animation: cpwait 1.6s ease-in-out infinite;
+  {% elif is_state('$statusEntity','working') %}
+  border: 1px solid var(--primary-color);
+  animation: cpwork 1.6s ease-in-out infinite;
+  {% else %}
+  border: 1px solid var(--divider-color);
+  box-shadow: none;
+  animation: none;
+  {% endif %}
+  transition: border 0.4s ease;
+}
+@keyframes cpwork {
+  0%   { box-shadow: 0 0 6px 0px var(--primary-color); }
+  50%  { box-shadow: 0 0 16px 2px var(--primary-color); }
+  100% { box-shadow: 0 0 6px 0px var(--primary-color); }
+}
+@keyframes cpwait {
+  0%   { box-shadow: 0 0 6px 0px var(--warning-color); }
+  50%  { box-shadow: 0 0 18px 3px var(--warning-color); }
+  100% { box-shadow: 0 0 6px 0px var(--warning-color); }
+}
+"@
+
+        # The collapsed card always carries the whole thing: the full question when one
+        # is waiting, otherwise the full text of the last response. The expander holds
+        # only supporting detail - the model's reasoning when Live Verbose is on, and
+        # the recent activity trail otherwise - so opening it is never required to read
+        # what was actually asked or answered.
+        $header = @{
+            type = 'markdown'
+            card_mod = @{ style = $headerStyle }
+            content = @"
+### {% if state_attr('$decisionEntity','question') %}🟡{% elif is_state('$statusEntity','working') %}🟢{% else %}⚪{% endif %} $($session.Name)
+*$($session.Machine)* &bull; status: **{% if state_attr('$decisionEntity','question') %}waiting for you{% else %}{{ states('$statusEntity') }}{% endif %}** &bull; {{ states('$activityEntity') }}
+{% set q = state_attr('$decisionEntity','question') %}{% set resp = state_attr('$activityEntity','response') %}{% if q %}
+
+---
+**Waiting on you:**
+
+{{ q }}{% elif resp %}
+
+{{ resp }}{% endif %}
+{% set r = state_attr('$activityEntity','reasoning') %}{% set hist = state_attr('$activityEntity','history') %}{% if r %}<details><summary><em>🧠 reasoning</em></summary>
+
+{{ r }}
+</details>{% elif hist %}<details><summary><em>recent activity</em></summary>
+
+{% for h in hist[-8:] %}- {{ h }}
+{% endfor %}
+</details>{% endif %}
+"@
+        }
+
+        # The Answer control is shown only while a question is actually waiting. The
+        # selector is optimistic, so the bridge drives its state to 'Awaiting answer...'
+        # when arming and 'Idle' when clearing; keying off that state is what makes the
+        # control appear exactly when it is usable. (An earlier version also excluded
+        # 'Awaiting answer...', which hid the dropdown precisely when it was needed.)
+        $answerCard = @{
+            type = 'conditional'
+            conditions = @(
+                @{ condition = 'state'; entity = $decisionEntity; state_not = 'Idle' }
+                @{ condition = 'state'; entity = $decisionEntity; state_not = 'unknown' }
+                @{ condition = 'state'; entity = $decisionEntity; state_not = 'unavailable' }
+            )
+            card = @{
+                type = 'entities'
+                show_header_toggle = $false
+                entities = @(@{ entity = $decisionEntity; name = 'Answer' })
+            }
+        }
+
+        # A multi-field question publishes one dropdown per field. Each is shown only
+        # while it actually carries options (its state is not 'Idle'), so a question
+        # with two fields shows exactly two dropdowns and the unused slots stay hidden.
+        # The name is deliberately omitted: an entities card's `name` is not templated,
+        # so a Jinja expression there renders as literal text. The bridge instead sets
+        # each dropdown's MQTT name to the field's own label, and the card inherits it.
+        $fieldCards = foreach ($fi in 1..4) {
+            $fe = "select.${node}_f$fi"
+            @{
+                type = 'conditional'
+                conditions = @(
+                    @{ condition = 'state'; entity = $fe; state_not = 'Idle' }
+                    @{ condition = 'state'; entity = $fe; state_not = 'unknown' }
+                    @{ condition = 'state'; entity = $fe; state_not = 'unavailable' }
+                )
+                card = @{
+                    type = 'entities'
+                    show_header_toggle = $false
+                    entities = @(@{ entity = $fe })
+                }
+            }
+        }
+
+        # Reply box and Send side by side as one control. layout-card's grid gives an
+        # exact "text fills the row, button is a fixed 56px column" split - a
+        # horizontal-stack splits 50/50, which left a huge button beside a cramped
+        # field. Each child is styled directly with card-mod rather than trying to
+        # pierce the stack from its parent, which is what failed before.
+        #
+        # Send is what commits a reply. Home Assistant commits a text entity as soon as
+        # the field loses focus, so acting on the value alone fired the moment you
+        # clicked away - easy to trigger by accident and impossible to take back.
+        # The row's leading icon and the card's own padding pushed the text field well
+        # right of the card above it, and made the pair sit lower than the button.
+        # Dropping both lines the field's left edge up with the cards above and lets
+        # align-items centre the two controls against each other.
+        #
+        # The icon lives inside hui-generic-entity-row's shadow root, so it needs
+        # card-mod's map form with a "$" suffixed selector to reach it - plain CSS in a
+        # style string cannot pierce a shadow boundary.
+        $bare = @"
+ha-card {
+  border: none;
+  box-shadow: none;
+  background: none;
+  margin: 0;
+  width: 100%;
+  padding: 0;
+}
+.card-content { padding: 0 !important; }
+"@
+        $noIcon = @{
+            '.' = ':host { --mdc-icon-size: 0px; }'
+            'hui-generic-entity-row$' = 'state-badge { display: none !important; } .info { display: none !important; }'
+        }
+        $replyCard = @{
+            type = 'custom:layout-card'
+            layout_type = 'custom:grid-layout'
+            layout = @{
+                'grid-template-columns' = '1fr 56px'
+                'grid-gap' = '0px'
+                # align-items centres the pair vertically; justify-items must stay
+                # stretch or the text field shrinks to its content width and floats in
+                # the middle of the row instead of filling it.
+                'align-items' = 'center'
+                'justify-items' = 'stretch'
+                margin = '0'
+            }
+            cards = @(
+                @{
+                    type = 'entities'
+                    show_header_toggle = $false
+                    card_mod = @{ style = $bare }
+                    entities = @(@{
+                        entity = $replyEntity
+                        name = 'Reply / continue'
+                        card_mod = @{ style = $noIcon }
+                    })
+                }
+                @{
+                    type = 'custom:button-card'
+                    entity = "button.${node}_submit"
+                    icon = 'mdi:send'
+                    show_name = $false
+                    show_state = $false
+                    size = '22px'
+                    tap_action = @{ action = 'toggle' }
+                    styles = @{
+                        card = @(
+                            @{ height = '48px' }
+                            @{ width = '48px' }
+                            @{ border = 'none' }
+                            @{ 'box-shadow' = 'none' }
+                            @{ background = 'none' }
+                            @{ padding = '0' }
+                        )
+                        # button-card lays its contents out on an internal grid that
+                        # still reserves a row for the (hidden) name, which floats the
+                        # icon above the card's true centre. Collapsing the grid to a
+                        # single centred cell puts it in the middle.
+                        grid = @(
+                            @{ 'grid-template-areas' = '"i"' }
+                            @{ 'grid-template-rows' = '1fr' }
+                            @{ 'grid-template-columns' = '1fr' }
+                            @{ 'place-items' = 'center' }
+                        )
+                        img_cell = @(
+                            @{ 'align-self' = 'center' }
+                            @{ 'justify-self' = 'center' }
+                            @{ margin = '0' }
+                            @{ padding = '0' }
+                        )
+                        icon = @(@{ color = 'var(--primary-color)' })
+                    }
+                }
+            )
+        }
+
+        # Each session is a vertical stack of its own cards. In a masonry view these
+        # stacks are packed into columns by height rather than aligned into rows, which
+        # is what stops one tall session from leaving dead space under every shorter
+        # card beside it.
+        @{
+            type = 'vertical-stack'
+            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard)
+        }
+    }
+
+    $sessionSections = @($sessionSections)
+    if ($sessionSections.Count -eq 0) {
+        $sessionSections = @(@{
+            type = 'markdown'
+            content = 'No live Copilot CLI sessions right now.'
+        })
+    }
+
+    # A masonry view, not a sections view. The sections view lays its sections out on a
+    # CSS grid that aligns them into rows, so a single tall session card left a column
+    # of dead space under every shorter card beside it. Masonry packs cards into
+    # columns by height instead, so cards of very different lengths - which is normal
+    # here, since a card carries a whole response - sit flush against each other.
+    $config = @{
+        title = 'Copilot Decisions'
+        views = @(@{
+            title = 'Decisions'
+            path = 'decision'
+            type = 'masonry'
+            cards = @($controlCards) + $sessionSections
+        })
+    }
+
+    [void](Invoke-CopilotHaWebSocket -Commands @(
+        @{ type = 'lovelace/config/save'; url_path = 'copilot-decisions'; config = $config }
+    ))
+}
+
+function Set-CopilotMqttEntityIds {
+    <#
+        Forces the bridge's MQTT entities onto deterministic, node-based entity_ids.
+
+        Without this the ids follow the session's display name, so renaming a session
+        would silently move every entity and strand any dashboard card pointing at
+        the old id.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$SessionId
+    )
+
+    $node = Get-CopilotMqttNodeId -SessionId $SessionId
+    $current = Resolve-CopilotMqttEntityIds -SessionId $SessionId
+
+    $targets = @{
+        Decision = "select.${node}_decision"
+        Reply = "text.${node}_reply"
+        Status = "sensor.${node}_status"
+        Activity = "sensor.${node}_activity"
+    }
+    # Per-field dropdowns for multi-field questions share the same treatment.
+    for ($i = 1; $i -le 4; $i++) { $targets["Field$i"] = "select.${node}_f$i" }
+    $targets['Submit'] = "button.${node}_submit"
+
+    $commands = @()
+    foreach ($key in @($targets.Keys)) {
+        if (-not $current.ContainsKey($key)) { continue }
+        if ($current[$key] -eq $targets[$key]) { continue }
+        $commands += @{
+            type = 'config/entity_registry/update'
+            entity_id = $current[$key]
+            new_entity_id = $targets[$key]
+        }
+    }
+
+    if ($commands.Count -gt 0) {
+        [void](Invoke-CopilotHaWebSocket -Commands $commands)
+    }
+
+    $targets
+}

@@ -1,0 +1,18 @@
+{
+  "homeAssistant": {
+    "baseUrl": "http://homeassistant.local:8123",
+    "token": "",
+    "tokenEnvVar": "COPILOT_HA_TOKEN"
+  },
+  "dashboard": {
+    "urlPath": "copilot-decisions"
+  },
+  "notifications": {
+    "enabled": false,
+    "service": "notify.notify",
+    "tickerCategory": ""
+  },
+  "copilot": {
+    "sessionStateRoot": ""
+  }
+}
