@@ -30,6 +30,10 @@
     Skip the Home Assistant connectivity check. Use for an offline install, or when
     the token comes from an environment variable that is not set yet.
 
+.PARAMETER NonInteractive
+    Never prompt. Without this, the installer discovers Home Assistant on the network
+    and asks for anything it still needs.
+
 .EXAMPLE
     .\install.ps1 -HomeAssistantUrl http://homeassistant.local:8123 -Token 'eyJ...'
 
@@ -45,6 +49,7 @@ param(
     [string]$TickerCategory,
     [string]$TargetHome,
     [switch]$SkipVerify,
+    [switch]$NonInteractive,
     [switch]$SkipTask
 )
 
@@ -60,6 +65,54 @@ $hookConfigPath = Join-Path $hooksDir 'decision-notifier.json'
 $taskName = 'CopilotBridgeDaemon'
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
+
+function Test-IsHomeAssistant {
+    <#
+        True when the URL serves Home Assistant. manifest.json is unauthenticated and
+        names the product outright, which makes it a reliable fingerprint; /api/ only
+        returns a bare 401 without a token.
+    #>
+    param([Parameter(Mandatory)][string]$BaseUrl, [int]$TimeoutSec = 4)
+
+    try {
+        $response = Invoke-WebRequest -Uri "$($BaseUrl.TrimEnd('/'))/manifest.json" `
+            -TimeoutSec $TimeoutSec -SkipHttpErrorCheck -ErrorAction Stop
+        if ($response.StatusCode -ne 200) { return $false }
+        $body = if ($response.Content -is [byte[]]) {
+            [Text.Encoding]::UTF8.GetString($response.Content)
+        } else { [string]$response.Content }
+        return ($body -match '"(short_)?name"\s*:\s*"Home Assistant"')
+    }
+    catch { return $false }
+}
+
+function Find-HomeAssistant {
+    <#
+        Locates Home Assistant on the local network.
+
+        Home Assistant publishes itself as homeassistant.local over mDNS, which Windows
+        resolves natively, so the default hostname plus its resolved address covers
+        almost every install. Anything more exotic is a typed URL. No subnet scanning:
+        it is slow and looks like hostile traffic.
+    #>
+    $candidates = [System.Collections.Generic.List[string]]::new()
+    foreach ($hostName in @('homeassistant.local', 'homeassistant')) {
+        $candidates.Add("http://${hostName}:8123")
+    }
+    try {
+        $resolved = Resolve-DnsName -Name 'homeassistant.local' -Type A -ErrorAction Stop
+        foreach ($address in @($resolved | Where-Object IPAddress | Select-Object -Expand IPAddress)) {
+            $candidates.Add("http://${address}:8123")
+        }
+    }
+    catch { }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        Write-Host "    probing $candidate" -ForegroundColor DarkGray
+        if (Test-IsHomeAssistant -BaseUrl $candidate) { return $candidate }
+    }
+    return $null
+}
 
 if (-not $IsWindows -and $PSVersionTable.PSVersion.Major -ge 6) {
     throw 'This bridge is Windows-only: reply injection uses AttachConsole/WriteConsoleInput.'
@@ -110,6 +163,42 @@ if ($PSBoundParameters.ContainsKey('TickerCategory') -and $TickerCategory) {
     $config.notifications.tickerCategory = $TickerCategory
 }
 
+# --------------------------------------------------------------- interactive
+# Fill in whatever is still missing by discovering Home Assistant and asking, so the
+# common case is running install.ps1 with no arguments at all.
+if (-not $NonInteractive) {
+    $needsUrl = -not ($PSBoundParameters.ContainsKey('HomeAssistantUrl') -and $HomeAssistantUrl)
+    $knownToken = $config.homeAssistant.token
+    if (-not $knownToken -and $config.homeAssistant.tokenEnvVar) {
+        $knownToken = [Environment]::GetEnvironmentVariable($config.homeAssistant.tokenEnvVar)
+    }
+
+    if ($needsUrl) {
+        Write-Step 'Looking for Home Assistant'
+        $found = Find-HomeAssistant
+        if ($found) {
+            Write-Host "    found $found" -ForegroundColor Green
+            $config.homeAssistant.baseUrl = $found
+        }
+        else {
+            Write-Host '    not found automatically' -ForegroundColor Yellow
+        }
+        $prompt = "    Home Assistant URL [$($config.homeAssistant.baseUrl)]"
+        $answer = Read-Host $prompt
+        if ($answer) { $config.homeAssistant.baseUrl = $answer.Trim().TrimEnd('/') }
+    }
+
+    if (-not $knownToken) {
+        $profileUrl = "$($config.homeAssistant.baseUrl.TrimEnd('/'))/profile/security"
+        Write-Step 'Home Assistant needs a long-lived access token'
+        Write-Host "    1. Open $profileUrl"
+        Write-Host '    2. Scroll to "Long-lived access tokens" and choose "Create token"'
+        Write-Host '    3. Name it anything (e.g. "Copilot CLI bridge") and copy the value'
+        $entered = Read-Host '    Paste the token here'
+        if ($entered) { $config.homeAssistant.token = $entered.Trim() }
+    }
+}
+
 $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding UTF8
 # The token lives here; keep it out of any shared listing.
 Write-Host "    baseUrl      : $($config.homeAssistant.baseUrl)"
@@ -130,8 +219,9 @@ else {
     }
 
     if (-not $effectiveToken) {
-        throw ("No Home Assistant token. Re-run with -Token '<long-lived token>', " +
-               "or set `$env:$($config.homeAssistant.tokenEnvVar), or pass -SkipVerify " +
+        throw ("No Home Assistant token. Re-run without -NonInteractive to be prompted, " +
+               "or pass -Token '<long-lived token>', or set " +
+               "`$env:$($config.homeAssistant.tokenEnvVar), or pass -SkipVerify " +
                'to finish the install and configure it later.')
     }
 

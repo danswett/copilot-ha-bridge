@@ -75,6 +75,18 @@ only a Home Assistant token.
 ```powershell
 git clone https://github.com/<you>/copilot-ha-bridge.git
 cd copilot-ha-bridge
+.\install.ps1
+```
+
+With no arguments the installer finds Home Assistant for you: it probes
+`homeassistant.local:8123` (the hostname Home Assistant publishes over mDNS, which
+Windows resolves natively) and confirms the product from its unauthenticated
+`manifest.json`. You confirm or correct the URL, then it walks you through creating a
+long-lived token and pastes straight into the config.
+
+If you already know the details, skip the prompts entirely:
+
+```powershell
 .\install.ps1 -HomeAssistantUrl http://homeassistant.local:8123 -Token 'eyJ...'
 ```
 
@@ -84,19 +96,19 @@ Then `/restart` any running Copilot sessions so they pick up the hooks, and open
 Optional out-of-band push when a session needs you:
 
 ```powershell
-.\install.ps1 -HomeAssistantUrl http://ha.lan:8123 -Token 'eyJ...' `
-              -NotifyService notify.mobile_app_pixel
+.\install.ps1 -NotifyService notify.mobile_app_pixel
 ```
 
 The installer is idempotent — re-run it to upgrade in place. Re-running with only
 some arguments keeps the rest of your settings, and the previous config is backed up
 to `copilot-ha-bridge.config.json.bak` first.
 
-It is **not interactive** — it takes parameters, not prompts. Before finishing it
-verifies the URL and token against `/api/` and checks that `mqtt.publish` exists, so a
-misconfigured install fails immediately instead of silently doing nothing later. Use
-`-SkipVerify` for an offline install, or when the token comes from an environment
-variable that isn't set yet.
+It is **not interactive** when you pass `-NonInteractive`, which is what you want in a
+script; otherwise it prompts for anything missing. Before finishing it verifies the URL
+and token against `/api/` and checks that `mqtt.publish` exists, so a misconfigured
+install fails immediately instead of silently doing nothing later. Use `-SkipVerify`
+for an offline install, or when the token comes from an environment variable that isn't
+set yet.
 
 To try a build without touching a working install, point it at a sandbox:
 
