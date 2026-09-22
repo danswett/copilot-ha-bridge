@@ -57,6 +57,11 @@ $ErrorActionPreference = 'Stop'
 
 $repoRoot = $PSScriptRoot
 $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
+
+# The VERSION file is the single source of truth, so the Apps & features entry, the
+# recorded config and the update check can never disagree about what is installed.
+$versionFile = Join-Path $repoRoot 'VERSION'
+$version = if (Test-Path -LiteralPath $versionFile) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { '0.0.0' }
 $copilotHome = Join-Path $installHome '.copilot'
 $hooksDir = Join-Path $copilotHome 'hooks'
 $skillDir = Join-Path $copilotHome 'skills\decision-notifier'
@@ -136,6 +141,7 @@ Get-ChildItem (Join-Path $repoRoot 'hooks') -File | ForEach-Object {
     Write-Host "    $($_.Name)"
 }
 
+if (Test-Path -LiteralPath $versionFile) { Copy-Item $versionFile $hooksDir -Force }
 # ---------------------------------------------------------------------- skill
 Write-Step "Installing the decision-notifier skill"
 if (-not (Test-Path -LiteralPath $skillDir)) { New-Item -ItemType Directory -Path $skillDir -Force | Out-Null }
@@ -202,6 +208,15 @@ if (-not $NonInteractive) {
         if ($entered) { $config.homeAssistant.token = $entered.Trim() }
     }
 }
+
+# Record what was installed, so the update check can compare against the newest
+# release without guessing.
+if (-not $config.PSObject.Properties.Name.Contains('updates')) {
+    $config | Add-Member -NotePropertyName 'updates' -NotePropertyValue ([pscustomobject]@{
+        repository = 'danswett/copilot-ha-bridge'; installedVersion = ''; checkForUpdates = $true
+    })
+}
+$config.updates.installedVersion = $version
 
 $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding UTF8
 # The token lives here; keep it out of any shared listing.
@@ -338,7 +353,6 @@ if (-not (Test-Path -LiteralPath $bridgeHome)) { New-Item -ItemType Directory -P
 Copy-Item (Join-Path $repoRoot 'uninstall.ps1') $bridgeHome -Force
 $uninstallScript = Join-Path $bridgeHome 'uninstall.ps1'
 
-$version = '1.0.0'
 # A sandbox install must uninstall itself, not the real one, so the entry carries its
 # own location. A normal install omits it and lets uninstall.ps1 use $HOME, which also
 # keeps the machine-wide cleanup (scheduled task, daemon processes) enabled.

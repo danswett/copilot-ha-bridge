@@ -14,5 +14,10 @@
   },
   "copilot": {
     "sessionStateRoot": ""
+  },
+  "updates": {
+    "repository": "danswett/copilot-ha-bridge",
+    "installedVersion": "",
+    "checkForUpdates": true
   }
 }

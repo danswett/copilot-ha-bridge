@@ -341,6 +341,76 @@ function Remove-CopilotMqttSession {
     }
 }
 
+function Publish-CopilotMqttUpdate {
+    <#
+        Publishes the bridge's own update status as a Home Assistant `update` entity,
+        plus a button to install it.
+
+        The update entity deliberately has no command_topic. Home Assistant's install
+        action for an MQTT update entity publishes to that topic and reports no state
+        change of its own - confirmed against a live instance - and nothing here
+        subscribes to MQTT, so the button it would render could never work. Rather
+        than ship a control that silently does nothing, the action is a separate
+        button whose press timestamp the daemon can actually see, which is the same
+        mechanism the per-session Submit button uses.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$InstalledVersion,
+        [Parameter(Mandatory)][string]$LatestVersion,
+        [string]$ReleaseUrl = '',
+        [string]$ReleaseNotes = '',
+        [Parameter(Mandatory)][hashtable]$Headers
+    )
+
+    $device = @{
+        identifiers  = @('copilot_cli_bridge')
+        name         = 'Copilot CLI Bridge'
+        manufacturer = 'GitHub Copilot CLI'
+    }
+    $stateTopic = "$($script:CopilotMqttConfig.TopicRoot)/update/state"
+
+    $config = @{
+        name        = 'Bridge Update'
+        unique_id   = 'copilot_cli_update'
+        object_id   = 'copilot_cli_update'
+        state_topic = $stateTopic
+        device_class = 'firmware'
+        icon        = 'mdi:package-up'
+        device      = $device
+    }
+    Publish-CopilotMqttMessage `
+        -Topic "$($script:CopilotMqttConfig.DiscoveryPrefix)/update/copilot_cli_bridge/update/config" `
+        -Payload ($config | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    # Release notes render in the entity's own dialog. They are capped because the
+    # whole payload travels through an MQTT message.
+    $notes = [string]$ReleaseNotes
+    if ($notes.Length -gt 2000) { $notes = $notes.Substring(0, 1997) + '...' }
+
+    $state = @{
+        installed_version = $InstalledVersion
+        latest_version    = $LatestVersion
+        title             = 'Copilot CLI Home Assistant bridge'
+    }
+    if ($ReleaseUrl) { $state['release_url'] = $ReleaseUrl }
+    if ($notes) { $state['release_summary'] = $notes }
+
+    Publish-CopilotMqttMessage -Topic $stateTopic `
+        -Payload ($state | ConvertTo-Json -Depth 6 -Compress) -Headers $Headers -Retain
+
+    $button = @{
+        name          = 'Install Bridge Update'
+        unique_id     = 'copilot_cli_install_update'
+        object_id     = 'copilot_cli_install_update'
+        command_topic = "$($script:CopilotMqttConfig.TopicRoot)/update/install"
+        icon          = 'mdi:download'
+        device        = $device
+    }
+    Publish-CopilotMqttMessage `
+        -Topic "$($script:CopilotMqttConfig.DiscoveryPrefix)/button/copilot_cli_bridge/install_update/config" `
+        -Payload ($button | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+}
+
 function Publish-CopilotMqttGlobalStatus {
     <#
         Publishes a single global sensor summarising all live sessions, so the

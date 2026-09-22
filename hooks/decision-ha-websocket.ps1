@@ -387,6 +387,41 @@ function Remove-CopilotVerboseToggle {
     return $true
 }
 
+function Set-CopilotMqttUpdateEntityIds {
+    <#
+        Forces the update entity and its install button onto deterministic ids.
+
+        Home Assistant builds an MQTT entity id from the device name plus the entity
+        name, so these first appear as update.copilot_cli_bridge_bridge_update and
+        button.copilot_cli_bridge_install_bridge_update. The daemon reads the button
+        by id on every reconcile, so it has to be predictable.
+    #>
+    $wanted = @{
+        'copilot_cli_update'         = 'update.copilot_cli_update'
+        'copilot_cli_install_update' = 'button.copilot_cli_install_update'
+    }
+
+    $registry = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
+    $byUniqueId = @{}
+    foreach ($entry in @($registry)) {
+        if ($entry.unique_id) { $byUniqueId[[string]$entry.unique_id] = $entry }
+    }
+
+    $changed = $false
+    foreach ($uniqueId in $wanted.Keys) {
+        $entry = $byUniqueId[$uniqueId]
+        if ($null -eq $entry) { continue }
+        if ([string]$entry.entity_id -eq $wanted[$uniqueId]) { continue }
+        [void](Invoke-CopilotHaWebSocket -Commands @(@{
+            type          = 'config/entity_registry/update'
+            entity_id     = [string]$entry.entity_id
+            new_entity_id = $wanted[$uniqueId]
+        }))
+        $changed = $true
+    }
+    $changed
+}
+
 function Save-CopilotSessionDashboard {
     <#
         Regenerates the copilot-decisions dashboard for the per-session MQTT model.

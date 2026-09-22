@@ -37,6 +37,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'decision-mqtt.ps1')
 . (Join-Path $PSScriptRoot 'decision-ha-websocket.ps1')
 . (Join-Path $PSScriptRoot 'decision-inject.ps1')
+. (Join-Path $PSScriptRoot 'bridge-update.ps1')
 
 $script:DaemonConfig = @{
     MutexName = 'Local\CopilotBridgeDaemon'
@@ -58,6 +59,12 @@ $script:DaemonConfig = @{
 # Session-set signature of the last dashboard rebuild, so the dashboard is only
 # regenerated when a session appears or exits, not on every reconcile.
 $script:DaemonDashboardSignature = $null
+
+# Update-check state. Initialised here rather than left undefined because the daemon
+# runs under StrictMode, where reading an unset variable throws.
+$script:DaemonUpdateAvailable = $false
+$script:DaemonUpdatePublished = $false
+$script:DaemonUpdateLastPress = ''
 
 function Write-DaemonLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -915,6 +922,63 @@ function Clear-CopilotMqttOrphans {
     }
 }
 
+function Sync-DaemonUpdateStatus {
+    <#
+        Publishes the bridge's own update status, and acts on a press of the install
+        button.
+
+        Both halves are deliberately forgiving: an update check that fails, or a
+        GitHub outage, must never disturb a running session. The check itself is
+        cached for a day inside Get-BridgeLatestRelease, so calling this on every
+        reconcile costs nothing.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Headers)
+
+    try {
+        $status = Get-BridgeUpdateStatus
+        $latest = if ($status.Available) { $status.Latest } else { $status.Installed }
+
+        if ($status.Available -ne $script:DaemonUpdateAvailable -or -not $script:DaemonUpdatePublished) {
+            Publish-CopilotMqttUpdate -InstalledVersion $status.Installed -LatestVersion $latest `
+                -ReleaseUrl $status.Url -ReleaseNotes $status.Notes -Headers $Headers
+            [void](Set-CopilotMqttUpdateEntityIds)
+            $script:DaemonUpdatePublished = $true
+            if ($status.Available -ne $script:DaemonUpdateAvailable) {
+                $script:DaemonUpdateAvailable = $status.Available
+                if ($status.Available) {
+                    Write-DaemonLog -Message "update available: $($status.Installed) -> $($status.Latest)"
+                }
+            }
+        }
+    }
+    catch {
+        Write-DaemonLog -Message "update check failed: $($_.Exception.Message)"
+        return
+    }
+
+    # The install button is a press timestamp, like the per-session Submit button:
+    # only a press newer than the last one seen counts, so a retained value cannot
+    # trigger an update on every reconcile or after a restart.
+    try {
+        $button = Get-HomeAssistantState -EntityId 'button.copilot_cli_install_update' -Headers $Headers
+        $press = [string]$button.state
+        if ($press -in @('unknown', 'unavailable', '')) { return }
+        if ($press -eq $script:DaemonUpdateLastPress) { return }
+
+        $firstSeen = [string]::IsNullOrEmpty($script:DaemonUpdateLastPress)
+        $script:DaemonUpdateLastPress = $press
+        # A press from before this daemon started is history, not an instruction.
+        if ($firstSeen) { return }
+
+        Write-DaemonLog -Message 'install update requested from Home Assistant'
+        $result = Invoke-BridgeSelfUpdate -Detached
+        Write-DaemonLog -Message "self-update: $($result.Detail)"
+    }
+    catch {
+        # The button may not exist yet on a first run.
+    }
+}
+
 function Sync-DaemonSessions {
     <#
         Brings the published Home Assistant entities in line with the live sessions,
@@ -1405,6 +1469,7 @@ function Start-BridgeDaemon {
     Repair-CopilotSessionEntities -Headers $headers -State $state -Live $live
     Invoke-PendingDecisions -Headers $headers -State $state -Live $live
     Invoke-PendingReplies -Headers $headers -State $state -Live $live
+    Sync-DaemonUpdateStatus -Headers $headers
     Write-DaemonState -State $state
 
     if ($RunOnce) {
@@ -1461,6 +1526,7 @@ function Start-BridgeDaemon {
                 Repair-CopilotSessionEntities -Headers $headers -State $state -Live $live
                 Invoke-PendingDecisions -Headers $headers -State $state -Live $live
                 Invoke-PendingReplies -Headers $headers -State $state -Live $live
+                Sync-DaemonUpdateStatus -Headers $headers
                 Write-DaemonState -State $state
             }
             catch {
