@@ -70,7 +70,16 @@ export async function ensureDashboard(ha, node, title, urlPath = DEFAULT_URL_PAT
   }
 }
 
-/** Drops this client's card when the session ends, leaving the view tidy. */
+/**
+ * Drops this client's card when the session ends, and removes the dashboard itself
+ * once the last card is gone.
+ *
+ * Leaving an empty dashboard behind is worse than it sounds: it sits in the Home
+ * Assistant sidebar looking like something is broken, long after the last MCP client
+ * exited. Removing it matches how the rest of the bridge behaves - entities are
+ * created on demand and cleared when the session that needed them goes away - and it
+ * costs nothing, because the next client recreates it.
+ */
 export async function removeFromDashboard(ha, node, urlPath = DEFAULT_URL_PATH) {
   const socket = await ha.connectSocket();
   try {
@@ -83,6 +92,17 @@ export async function removeFromDashboard(ha, node, urlPath = DEFAULT_URL_PATH) 
       (card) => !JSON.stringify(card).includes(`${node}_decision`),
     );
     if (cards.length === (view.cards ?? []).length) return false;
+
+    if (cards.length === 0 && config.views.length === 1) {
+      // Look the id up rather than deriving it: Home Assistant stores copilot-mcp as
+      // copilot_mcp, and a delete with the wrong form fails with config_not_found.
+      const dashboards = await socket.send({ type: 'lovelace/dashboards/list' });
+      const entry = (dashboards.result ?? []).find((d) => d.url_path === urlPath);
+      if (entry) {
+        await socket.send({ type: 'lovelace/dashboards/delete', dashboard_id: entry.id });
+        return true;
+      }
+    }
 
     await socket.send({
       type: 'lovelace/config/save',

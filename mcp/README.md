@@ -90,7 +90,10 @@ file. Everything it needs it creates:
 
 It writes to a separate dashboard on purpose and never touches `copilot-decisions`, so
 the two installs can share one Home Assistant without fighting. Cards are merged, so
-several MCP clients each add their own; each is withdrawn when its client disconnects.
+several MCP clients each add their own; each is withdrawn when its client disconnects,
+and the dashboard itself is removed once the last card goes — an empty dashboard
+sitting in the sidebar looks like a fault rather than an idle feature. The next client
+recreates it.
 
 ## Tests
 

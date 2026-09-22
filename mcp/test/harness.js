@@ -242,13 +242,19 @@ async function testDashboard() {
     await client.close();
   }
 
-  // The card should be withdrawn when the client disconnects.
-  await new Promise((resolve) => setTimeout(resolve, 4000));
+  // The card should be withdrawn when the client disconnects, and because this was
+  // the only card, the dashboard should go with it rather than sitting empty in the
+  // Home Assistant sidebar.
+  await new Promise((resolve) => setTimeout(resolve, 5000));
   const cleaned = await haSocketSend({ type: 'lovelace/config', url_path: 'copilot-mcp' });
-  const remaining = cleaned.result?.views?.[0]?.cards ?? [];
+  const remaining = cleaned.success ? (cleaned.result?.views?.[0]?.cards ?? []) : [];
   check('the card was removed on shutdown',
     !remaining.some((card) => JSON.stringify(card).includes(`${node}_decision`)),
     `${remaining.length} card(s) left`);
+
+  const dashboards = await haSocketSend({ type: 'lovelace/dashboards/list' });
+  const lingering = (dashboards.result ?? []).some((d) => d.url_path === 'copilot-mcp');
+  check('the empty dashboard was removed too', !lingering);
 }
 
 async function main() {
