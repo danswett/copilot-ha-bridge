@@ -63,6 +63,10 @@ $skillDir = Join-Path $copilotHome 'skills\decision-notifier'
 $configPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
 $hookConfigPath = Join-Path $hooksDir 'decision-notifier.json'
 $taskName = 'CopilotBridgeDaemon'
+# A sandbox install must not collide with the real Add/Remove Programs entry.
+$arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBridge' +
+          $(if ($TargetHome) { '_Sandbox' } else { '' })
+$bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -316,8 +320,39 @@ if (-not $SkipTask) {
     Write-Host "    registered and started"
 }
 
+# ------------------------------------------------------- add/remove programs
+# No installer executable is needed for this: a per-user uninstall key is the same
+# list Settings reads, and it avoids the SmartScreen warning an unsigned exe would
+# produce. uninstall.ps1 is copied somewhere stable so the entry keeps working after
+# the cloned repo is deleted.
+Write-Step 'Registering in Apps & features'
+if (-not (Test-Path -LiteralPath $bridgeHome)) { New-Item -ItemType Directory -Path $bridgeHome -Force | Out-Null }
+Copy-Item (Join-Path $repoRoot 'uninstall.ps1') $bridgeHome -Force
+$uninstallScript = Join-Path $bridgeHome 'uninstall.ps1'
+
+$version = '1.0.0'
+# A sandbox install must uninstall itself, not the real one, so the entry carries its
+# own location. A normal install omits it and lets uninstall.ps1 use $HOME, which also
+# keeps the machine-wide cleanup (scheduled task, daemon processes) enabled.
+$uninstallArgs = "-NoProfile -ExecutionPolicy Bypass -File `"$uninstallScript`" -ClearEntities"
+if ($TargetHome) { $uninstallArgs += " -TargetHome `"$installHome`"" }
+
+New-Item -Path $arpKey -Force | Out-Null
+$arpValues = @{
+    DisplayName     = 'Copilot CLI Home Assistant bridge'
+    DisplayVersion  = $version
+    Publisher       = 'copilot-ha-bridge'
+    InstallLocation = $bridgeHome
+    URLInfoAbout    = 'https://github.com/danswett/copilot-ha-bridge'
+    UninstallString = "pwsh.exe $uninstallArgs"
+    QuietUninstallString = "pwsh.exe $uninstallArgs"
+}
+foreach ($name in $arpValues.Keys) { Set-ItemProperty -Path $arpKey -Name $name -Value $arpValues[$name] }
+Set-ItemProperty -Path $arpKey -Name NoModify -Value 1 -Type DWord
+Set-ItemProperty -Path $arpKey -Name NoRepair -Value 1 -Type DWord
+Write-Host "    'Copilot CLI Home Assistant bridge' is now uninstallable from Settings"
+
 Write-Step 'Done'
-Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Yellow
 Write-Host '  1. Restart any running Copilot CLI sessions (/restart) so they pick up the hooks.'
 Write-Host '  2. Open the Copilot Decisions dashboard in Home Assistant.'

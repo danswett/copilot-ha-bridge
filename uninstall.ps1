@@ -32,6 +32,9 @@ $ErrorActionPreference = 'Stop'
 
 $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
 $copilotHome = Join-Path $installHome '.copilot'
+$arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBridge' +
+          $(if ($TargetHome) { '_Sandbox' } else { '' })
+$bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
 $hooksDir = Join-Path $copilotHome 'hooks'
 $skillDir = Join-Path $copilotHome 'skills\decision-notifier'
 $configPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
@@ -40,7 +43,14 @@ $taskName = 'CopilotBridgeDaemon'
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
 # Entities first: this needs the hooks and config that the rest of the script removes.
-if ($ClearEntities) {
+if ($ClearEntities -and $TargetHome) {
+    # Entities, the verbose toggle and the dashboard live in the shared Home Assistant
+    # instance, not under the install root. Clearing them from a sandbox uninstall
+    # would wipe the real install's dashboard, so it is refused outright.
+    Write-Warning ('Ignoring -ClearEntities because -TargetHome is set: Home Assistant ' +
+                   'entities are global and would belong to the real install.')
+}
+elseif ($ClearEntities) {
     Write-Step 'Clearing Home Assistant entities'
     try {
         . (Join-Path $hooksDir 'decision-bridge-common.ps1')
@@ -135,6 +145,19 @@ if (-not $KeepConfig -and (Test-Path -LiteralPath $configPath)) {
     Remove-Item -LiteralPath $configPath -Force
     # The install-time backup holds the same token.
     if (Test-Path -LiteralPath "$configPath.bak") { Remove-Item -LiteralPath "$configPath.bak" -Force }
+}
+
+if (Test-Path -LiteralPath $arpKey) {
+    Write-Step 'Removing the Apps & features entry'
+    Remove-Item -LiteralPath $arpKey -Recurse -Force
+}
+
+# Last, because this script usually runs from here via the uninstall entry. Deleting
+# the folder while it executes is fine on Windows: the file stays open until the
+# process exits.
+if (Test-Path -LiteralPath $bridgeHome) {
+    Write-Step 'Removing the installed uninstaller'
+    Remove-Item -LiteralPath $bridgeHome -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Step 'Done'

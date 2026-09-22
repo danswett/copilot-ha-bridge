@@ -72,8 +72,16 @@ only a Home Assistant token.
 
 ## Install
 
+The one-liner:
+
 ```powershell
-git clone https://github.com/<you>/copilot-ha-bridge.git
+irm https://raw.githubusercontent.com/danswett/copilot-ha-bridge/main/bootstrap.ps1 | iex
+```
+
+Or from a clone:
+
+```powershell
+git clone https://github.com/danswett/copilot-ha-bridge.git
 cd copilot-ha-bridge
 .\install.ps1
 ```
@@ -83,6 +91,9 @@ With no arguments the installer finds Home Assistant for you: it probes
 Windows resolves natively) and confirms the product from its unauthenticated
 `manifest.json`. You confirm or correct the URL, then it walks you through creating a
 long-lived token and pastes straight into the config.
+
+It also registers in **Apps & features**, so it uninstalls like any other program. No
+installer executable, no admin rights, and no SmartScreen warning.
 
 If you already know the details, skip the prompts entirely:
 
@@ -167,12 +178,15 @@ dashboard view.
 
 ## Uninstall
 
+From **Settings → Apps → Installed apps**, or:
+
 ```powershell
 .\uninstall.ps1 -ClearEntities
 ```
 
-`-ClearEntities` clears the retained MQTT discovery topics so Home Assistant drops the
-bridge's entities; without it they linger. `-KeepConfig` preserves your settings.
+`-ClearEntities` clears the retained MQTT discovery topics, the Live Verbose helper and
+the dashboard view, so Home Assistant is left clean; without it they linger.
+`-KeepConfig` preserves your settings.
 
 ---
 
