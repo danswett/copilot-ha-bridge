@@ -4,19 +4,24 @@
     Tests for the Codex adapter: hook event handling and the rollout reducer.
 
 .DESCRIPTION
-    The hook fixtures are real payloads captured from Codex 0.155.0-alpha.6.
+    The hook fixtures are real payloads captured from Codex 0.155.0-alpha.6, and so
+    is the rollout fixture: its two reasoning lines are the verbatim output of a
+    `gpt-6-astra` turn run at `model_reasoning_effort=high` with
+    `model_reasoning_summary=detailed`, with only the opaque `encrypted_content`
+    truncated and the cwd made generic.
 
-    The rollout fixture is not. Its envelope - `{timestamp, ordinal, type, payload}`
-    with `event_msg` / `item_completed` / `item.type` - matches real captured data,
-    but its `Reasoning` item is synthetic, because no model has been observed emitting
-    one: across 26 real rollouts, including runs with `model_reasoning_effort=high`
-    and `model_reasoning_summary=detailed`, only AgentMessage, UserMessage and
-    CommandExecution ever appeared. The item is modelled on the `Reasoning` variant
-    declared in codex-rs `ThreadItemDetails`, which holds `{ text }`.
+    That capture corrected the reducer. An earlier version of this fixture was
+    synthetic, modelled on the `Reasoning` variant in codex-rs `ThreadItemDetails`,
+    which holds `{ text }` - and the real item carries no `text` field at all. It is
+    `summary_text`, an array of strings. The reducer had been matching a field that
+    never appears, so it would have returned nothing forever.
 
-    These tests therefore prove the reducer honours the documented contract. They do
-    not prove Codex emits reasoning. That distinction is deliberate and is repeated in
-    the adapter README.
+    What arrives is the model's *summary* of its reasoning: `raw_content` is empty
+    and `encrypted_content` is opaque by design.
+
+    Reasoning is opt-in. It is absent unless `model_reasoning_effort` is set, and a
+    turn that does not reason emits no items at all, so the no-reasoning case below
+    is the common one rather than an edge case.
 
     Needs no Home Assistant and no Codex session.
 #>
@@ -109,17 +114,37 @@ finally {
     Remove-CodexApprovalMarker -SessionId $sessionId | Out-Null
 }
 
-Write-Host '--- rollout reducer (contract, not observed behaviour) ---'
+Write-Host '--- rollout reducer (real captured format) ---'
 $lines = @(Get-Content (Join-Path $fixtures 'rollout-with-reasoning.jsonl') | Where-Object { $_.Trim() })
 Test-That 'the latest reasoning wins' {
-    (Get-CodexReasoningFromTranscript -Lines $lines) -eq 'Double-checked the arithmetic.'
+    (Get-CodexReasoningFromTranscript -Lines $lines) -eq "**Checking the remainder**`nFive minus three leaves two."
 } (Get-CodexReasoningFromTranscript -Lines $lines)
+Test-That 'a real event_msg Reasoning item is read from summary_text' {
+    $one = @($lines | Where-Object { $_ -match '"Reasoning"' } | Select-Object -First 1)
+    (Get-CodexReasoningFromTranscript -Lines $one) -eq '**Filling the 5-unit jug**'
+} (Get-CodexReasoningFromTranscript -Lines @($lines | Where-Object { $_ -match '"Reasoning"' } | Select-Object -First 1))
+Test-That 'a real response_item reasoning is read from summary[].text' {
+    # -cmatch: the event_msg spelling is "Reasoning", and a case-insensitive match
+    # would select it too.
+    $one = @($lines | Where-Object { $_ -cmatch '"type":"reasoning"' })
+    (Get-CodexReasoningFromTranscript -Lines $one) -eq '**Filling the 5-unit jug**'
+} (Get-CodexReasoningFromTranscript -Lines @($lines | Where-Object { $_ -cmatch '"type":"reasoning"' }))
+Test-That 'multiple summary_text entries are joined' {
+    (Get-CodexReasoningFromTranscript -Lines $lines) -match 'Five minus three'
+}
+Test-That 'the opaque encrypted_content is never surfaced' {
+    (Get-CodexReasoningFromTranscript -Lines $lines) -notmatch 'gAAAAAB'
+}
 Test-That 'agent messages are not treated as reasoning' {
-    (Get-CodexReasoningFromTranscript -Lines $lines) -notmatch '391\.$'
+    (Get-CodexReasoningFromTranscript -Lines $lines) -notmatch 'twice\.$'
 }
 Test-That 'a rollout with no reasoning yields nothing' {
-    $none = @($lines | Where-Object { $_ -notmatch 'Reasoning' })
+    $none = @($lines | Where-Object { $_ -notmatch 'reasoning' })
     $null -eq (Get-CodexReasoningFromTranscript -Lines $none)
+}
+Test-That 'the tolerated flat text shape still works' {
+    $flat = @('{"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","id":"r9","text":"flat shape"}}}')
+    (Get-CodexReasoningFromTranscript -Lines $flat) -eq 'flat shape'
 }
 Test-That 'malformed lines are skipped' {
     $null -eq (Get-CodexReasoningFromTranscript -Lines @('{bad', ''))
