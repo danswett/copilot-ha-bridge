@@ -670,6 +670,27 @@ function Invoke-PendingDecisions {
         $isChoice = ([string]$marker.mode -eq 'multiple_choice')
         $markerFields = @($marker.fields)
         $isMultiField = $markerFields.Count -gt 1
+
+        # A hook whose Home Assistant work was cut short by its deadline leaves a
+        # marker with no card behind it. Arm it here so an outage during the hook does
+        # not silently cost the question its dashboard card.
+        try {
+            $armed = Get-HomeAssistantState -EntityId "select.${node}_decision" -Headers $Headers
+            $armedOptions = @($armed.attributes.options)
+            if ($armedOptions.Count -le 1) {
+                Set-CopilotMqttDecision -SessionId $sessionId `
+                    -SessionName ([string]$State[$sessionId].Name) `
+                    -Machine ([string]$State[$sessionId].Machine) `
+                    -Question ([string]$marker.question) `
+                    -Choices @($marker.choices) -Fields $markerFields `
+                    -DecisionId ([string]$marker.decisionId) -Headers $Headers | Out-Null
+                Write-DaemonLog -Message "armed card from marker for $($sessionId.Substring(0,8)) (hook could not reach Home Assistant)"
+            }
+        }
+        catch {
+            Write-DaemonLog -Message "marker re-arm check failed for $sessionId : $($_.Exception.Message)"
+        }
+
         try {
             if ($isMultiField) {
                 # One dropdown per field. Cancel still rides on the main selector, and

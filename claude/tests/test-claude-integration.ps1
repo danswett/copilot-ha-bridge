@@ -61,10 +61,47 @@ function Invoke-Router {
 }
 
 function Get-DecisionState {
-    param([string]$SessionId)
+    param([string]$SessionId, [int]$TimeoutSeconds = 25)
+
+    # Poll rather than sleep a fixed interval: MQTT discovery, the entity-registry
+    # rename and arming all take a variable amount of time on a real instance, and a
+    # fixed wait makes this test flaky rather than meaningful.
     $node = Get-CopilotMqttNodeId -SessionId $SessionId
-    try { Get-HomeAssistantState -EntityId "select.${node}_decision" -Headers $headers }
-    catch { $null }
+    $deadline = [DateTimeOffset]::Now.AddSeconds($TimeoutSeconds)
+    $last = $null
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        try {
+            $state = Get-HomeAssistantState -EntityId "select.${node}_decision" -Headers $headers
+            if ($null -ne $state) {
+                $last = $state
+                if (@($state.attributes.options).Count -gt 1) { return $state }
+            }
+        }
+        catch {
+            if ($env:BRIDGE_TEST_DEBUG) { Write-Host "    [debug] $($_.Exception.Message)" }
+        }
+        Start-Sleep -Milliseconds 1000
+    }
+    $last
+}
+
+function Get-EntityState {
+    param([string]$EntityId, [string]$Expected = '', [int]$TimeoutSeconds = 20)
+
+    $deadline = [DateTimeOffset]::Now.AddSeconds($TimeoutSeconds)
+    $last = $null
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        try {
+            $state = Get-HomeAssistantState -EntityId $EntityId -Headers $headers
+            if ($null -ne $state) {
+                $last = $state
+                if (-not $Expected -or [string]$state.state -eq $Expected) { return $state }
+            }
+        }
+        catch { }
+        Start-Sleep -Milliseconds 1000
+    }
+    $last
 }
 
 function Remove-TestSession {
@@ -85,9 +122,8 @@ try {
     Test-That 'the hook exits 0' { $run.ExitCode -eq 0 } "exit $($run.ExitCode)"
     Test-That 'it writes nothing to stdout, leaving Claude''s prompt untouched' { $run.Output -eq '' } "[$($run.Output)]"
 
-    Start-Sleep -Seconds 3
     $decision = Get-DecisionState -SessionId $sessionId
-    Test-That 'the decision entity exists' { $null -ne $decision } (($decision.entity_id) ?? 'missing')
+    Test-That 'the decision entity exists' { $null -ne $decision } $(if ($decision) { $decision.entity_id } else { 'missing' })
     Test-That 'it is armed with both options' {
         $options = @($decision.attributes.options)
         ($options -join '|') -match 'PostgreSQL' -and ($options -join '|') -match 'SQLite'
@@ -110,10 +146,9 @@ try {
     $touched.Add($multiSession)
     Test-That 'the hook exits 0' { $runMulti.ExitCode -eq 0 }
 
-    Start-Sleep -Seconds 3
     $node = Get-CopilotMqttNodeId -SessionId $multiSession
-    $f1 = try { Get-HomeAssistantState -EntityId "select.${node}_f1" -Headers $headers } catch { $null }
-    $f2 = try { Get-HomeAssistantState -EntityId "select.${node}_f2" -Headers $headers } catch { $null }
+    $f1 = Get-EntityState -EntityId "select.${node}_f1"
+    $f2 = Get-EntityState -EntityId "select.${node}_f2"
     Test-That 'field 1 is armed with the database options' {
         (@($f1.attributes.options) -join '|') -match 'PostgreSQL'
     } (@($f1.attributes.options) -join ' | ')
@@ -154,14 +189,13 @@ try {
         $LASTEXITCODE -eq 0 -and (($notifyOut | Out-String).Trim() -eq '')
     } "exit $LASTEXITCODE"
 
-    Start-Sleep -Seconds 4
     $notifyNode = Get-CopilotMqttNodeId -SessionId $notifySession
-    $status = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_status" -Headers $headers } catch { $null }
-    $activity = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_activity" -Headers $headers } catch { $null }
-    Test-That 'the status reads waiting' { $status.state -eq 'waiting' } (($status.state) ?? 'missing')
+    $status = Get-EntityState -EntityId "sensor.${notifyNode}_status" -Expected 'waiting'
+    $activity = Get-EntityState -EntityId "sensor.${notifyNode}_activity"
+    Test-That 'the status reads waiting' { $status.state -eq 'waiting' } $(if ($status) { $status.state } else { 'missing' })
     Test-That 'the activity carries what Claude is asking for' {
         $activity.state -match 'git push'
-    } (($activity.state) ?? 'missing')
+    } $(if ($activity) { $activity.state } else { 'missing' })
 
     Write-Host '--- Stop marks the turn idle and uses last_assistant_message ---'
     $stopHook = Join-Path $PSScriptRoot '..\hooks\notify-claude-stop.ps1'
@@ -174,13 +208,12 @@ try {
         $LASTEXITCODE -eq 0 -and (($stopOut | Out-String).Trim() -eq '')
     } "exit $LASTEXITCODE"
 
-    Start-Sleep -Seconds 4
-    $statusAfter = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_status" -Headers $headers } catch { $null }
-    $activityAfter = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_activity" -Headers $headers } catch { $null }
-    Test-That 'the session goes idle' { $statusAfter.state -eq 'idle' } (($statusAfter.state) ?? 'missing')
+    $statusAfter = Get-EntityState -EntityId "sensor.${notifyNode}_status" -Expected 'idle'
+    $activityAfter = Get-EntityState -EntityId "sensor.${notifyNode}_activity"
+    Test-That 'the session goes idle' { $statusAfter.state -eq 'idle' } $(if ($statusAfter) { $statusAfter.state } else { 'missing' })
     Test-That 'the response comes from last_assistant_message' {
         $activityAfter.state -match 'hello from the scratch file'
-    } (($activityAfter.state) ?? 'missing')
+    } $(if ($activityAfter) { $activityAfter.state } else { 'missing' })
 }
 finally {
     Write-Host '--- cleanup ---'

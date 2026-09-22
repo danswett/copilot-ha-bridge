@@ -76,6 +76,14 @@ try {
     $workingDirectory = [string]$event.cwd
     if ([string]::IsNullOrWhiteSpace($workingDirectory)) { $workingDirectory = 'Unknown folder' }
 
+    # Probe before committing to any Home Assistant work: this hook runs before the native prompt appears.
+    # A host that is gone is detected in about a second; one that answers gets a
+    # budget generous enough for discovery, the registry rename and arming.
+    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
+        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
+        Write-AllowDecision
+    }
+    Set-DecisionBridgeDeadline -Seconds 45
     $headers = Get-HomeAssistantHeaders
     $display = Get-CopilotSessionDisplay -SessionId $sessionId -WorkingDirectory $workingDirectory
     $node = Get-CopilotMqttNodeId -SessionId $sessionId

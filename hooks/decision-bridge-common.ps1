@@ -121,6 +121,62 @@ function Test-DecisionTransientHttpError {
     $false
 }
 
+# No deadline unless a caller sets one. This must be initialised rather than left
+# undefined: under Set-StrictMode -Version Latest, reading an unset variable throws,
+# which would make every caller that does not set a budget - the daemon included -
+# fail inside the retry layer.
+$script:DecisionBridgeDeadline = $null
+
+function Test-HomeAssistantReachable {    <#
+        Cheap liveness probe, used by hooks before they commit to any Home Assistant
+        work.
+
+        A flat budget cannot serve both cases: the healthy publish path legitimately
+        takes many seconds (discovery, a registry rename over WebSocket, then arming),
+        while an unreachable host must not cost more than a moment because a PreToolUse
+        hook runs before the native prompt appears. Probing first separates them - a
+        host that is gone is detected in about a second, and only a host that answers
+        earns the longer budget.
+
+        Deliberately single-shot with no retry: this is a reachability question, not a
+        request worth salvaging.
+    #>
+    param([int]$TimeoutSec = 2)
+
+    try {
+        $null = Invoke-RestMethod -Uri "$($script:DecisionBridgeConfig.HomeAssistantBaseUrl)/api/" `
+            -Headers (Get-HomeAssistantHeaders) -TimeoutSec $TimeoutSec
+        return $true
+    }
+    catch {
+        return $false
+    }
+}
+
+function Set-DecisionBridgeDeadline {
+    <#
+        Bounds how long the Home Assistant calls in this process may take in total.
+
+        The retry layer exists so a blip cannot break a live question, but in a hook
+        that resilience becomes latency: with Home Assistant unreachable the routers
+        took 19-34 seconds, and a PreToolUse hook that slow delays the very prompt the
+        bridge promises never to block. Hooks therefore set a hard budget and fail open
+        the moment it is spent; the daemon, which has time, sets none.
+
+        Pass 0 to clear it.
+    #>
+    param([Parameter(Mandatory)][int]$Seconds)
+
+    $script:DecisionBridgeDeadline = if ($Seconds -gt 0) {
+        [DateTimeOffset]::Now.AddSeconds($Seconds)
+    } else { $null }
+}
+
+function Get-DecisionBridgeRemainingSeconds {
+    if ($null -eq $script:DecisionBridgeDeadline) { return [double]::PositiveInfinity }
+    [Math]::Max(0, ($script:DecisionBridgeDeadline - [DateTimeOffset]::Now).TotalSeconds)
+}
+
 function Invoke-DecisionHttpRequest {
     <#
         Wraps Invoke-RestMethod with bounded exponential backoff.
@@ -129,6 +185,10 @@ function Invoke-DecisionHttpRequest {
         blip - propagated out of the eight hour ask_user wait, the hook failed open,
         and the CLI re-prompted the same question while the dashboard card was still
         live. Two answer paths for one question.
+
+        When a deadline is set the retries are also bounded by wall clock, and each
+        request's own timeout is clamped to what is left, so the caller can never
+        overrun its budget waiting on a host that is simply gone.
     #>
     param(
         [Parameter(Mandatory)]
@@ -139,13 +199,29 @@ function Invoke-DecisionHttpRequest {
 
     $delayMs = $script:DecisionBridgeConfig.HttpRetryInitialDelayMs
     for ($attempt = 0; $attempt -le $RetryCount; $attempt++) {
+        $remaining = Get-DecisionBridgeRemainingSeconds
+        if ($remaining -le 0) {
+            throw [TimeoutException]::new('Home Assistant budget for this hook is spent.')
+        }
+
+        $call = $Parameters
+        if ([double]::IsFinite($remaining)) {
+            $call = @{} + $Parameters
+            $requested = if ($call.ContainsKey('TimeoutSec')) { [int]$call['TimeoutSec'] } else { 15 }
+            $call['TimeoutSec'] = [Math]::Max(1, [Math]::Min($requested, [int][Math]::Floor($remaining)))
+        }
+
         try {
-            return Invoke-RestMethod @Parameters
+            return Invoke-RestMethod @call
         }
         catch {
             $isLast = $attempt -ge $RetryCount
             if ($isLast -or -not (Test-DecisionTransientHttpError -ErrorRecord $_)) {
                 throw
+            }
+            # No point sleeping into a deadline that will already have passed.
+            if ((Get-DecisionBridgeRemainingSeconds) * 1000 -le $delayMs) {
+                throw [TimeoutException]::new('Home Assistant budget for this hook is spent.')
             }
             Start-Sleep -Milliseconds $delayMs
             $delayMs = [Math]::Min($delayMs * 2, 5000)
@@ -940,6 +1016,29 @@ function Get-HomeAssistantState {
 
 
 
+function Remove-CopilotTemplateMarkup {
+    <#
+        Neutralises Home Assistant template syntax in text that will be interpolated
+        into a Lovelace template.
+
+        Session display names are not trusted input: a Copilot session is named after
+        its task, and a Claude session after its working directory, so a repository or
+        folder called "{{ states('device_tracker.me') }}" would otherwise be rendered
+        as a template by Home Assistant. That was confirmed against a live instance -
+        the injected expression evaluated and read real entity state - so anything
+        session-derived is sanitised here before it can reach a card, a notification
+        or a device name.
+
+        The delimiters are broken with a zero-width space rather than stripped, so the
+        text still reads correctly while being inert.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $zws = [char]0x200B
+    $Text -replace '\{\{', "{$zws{" -replace '\{%', "{$zws%" -replace '\{#', "{$zws#"
+}
+
 function Get-CopilotSessionDisplay {
     param(
         [Parameter(Mandatory)]
@@ -968,6 +1067,10 @@ function Get-CopilotSessionDisplay {
 
     $machine = [Environment]::MachineName
 
+    # The name comes from the session's own workspace file, which is named after the
+    # task, so treat it as untrusted before it reaches a template.
+    $name = Remove-CopilotTemplateMarkup -Text $name
+
     $label = "$name - $machine"
     if ($label.Length -gt 255) {
         $label = $label.Substring(0, 252) + '...'
@@ -982,6 +1085,23 @@ function Get-CopilotSessionDisplay {
 }
 
 
+function Get-CopilotSafeSessionKey {
+    <#
+        A filesystem-safe key for a session id.
+
+        Session ids arrive in hook payloads and are used to build paths, so a value
+        containing separators or traversal segments must not be able to escape the
+        directory it belongs in. Real ids are UUIDs and pass through unchanged.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$SessionId)
+
+    $clean = ($SessionId -replace '[^a-zA-Z0-9._-]', '')
+    $clean = $clean.TrimStart('.')
+    if ([string]::IsNullOrWhiteSpace($clean)) { return 'unknown' }
+    if ($clean.Length -gt 96) { $clean = $clean.Substring(0, 96) }
+    $clean
+}
+
 function Get-CopilotDecisionMarkerPath {
     <#
         Resolves the pending-decision marker for a session.
@@ -993,12 +1113,13 @@ function Get-CopilotDecisionMarkerPath {
     #>
     param([Parameter(Mandatory)][string]$SessionId)
 
-    $sessionDirectory = Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
+    $key = Get-CopilotSafeSessionKey -SessionId $SessionId
+    $sessionDirectory = Join-Path $script:DecisionBridgeConfig.SessionStateRoot $key
     if (Test-Path -LiteralPath $sessionDirectory) {
         return Join-Path $sessionDirectory 'copilot-pending-decision.json'
     }
 
-    $fallback = Join-Path (Join-Path $env:TEMP 'copilot-bridge-markers') $SessionId
+    $fallback = Join-Path (Join-Path $env:TEMP 'copilot-bridge-markers') $key
     if (-not (Test-Path -LiteralPath $fallback)) {
         New-Item -ItemType Directory -Path $fallback -Force | Out-Null
     }

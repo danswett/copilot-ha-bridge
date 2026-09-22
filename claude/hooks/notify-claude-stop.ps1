@@ -43,6 +43,14 @@ try {
     Write-ClaudeSessionRegistration -SessionId $sessionId -TranscriptPath $transcriptPath `
         -WorkingDirectory ([string]$event.cwd) -ProcessId (Get-ClaudeOwningProcessId) | Out-Null
 
+    # Probe before committing to any Home Assistant work: the turn has already ended.
+    # A host that is gone is detected in about a second; one that answers gets a
+    # budget generous enough for discovery, the registry rename and arming.
+    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
+        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
+        Exit-Silently
+    }
+    Set-DecisionBridgeDeadline -Seconds 45
     $headers = Get-HomeAssistantHeaders
     $display = Get-ClaudeSessionDisplay -SessionId $sessionId -WorkingDirectory ([string]$event.cwd)
 

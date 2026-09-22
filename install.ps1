@@ -232,6 +232,14 @@ else {
     $base = $config.homeAssistant.baseUrl.TrimEnd('/')
     $authHeaders = @{ Authorization = "Bearer $effectiveToken"; 'Content-Type' = 'application/json' }
 
+    # A long-lived token is sent on every request, so over plain HTTP it crosses the
+    # network in the clear. Local Home Assistant installs are usually http, so this
+    # warns rather than blocks.
+    if ($base -match '^http://' -and $base -notmatch '^http://(localhost|127\.0\.0\.1|\[::1\])') {
+        Write-Warning ("$base is plain HTTP, so the access token is sent unencrypted " +
+                       'over your network. Prefer https:// if your Home Assistant has a certificate.')
+    }
+
     try {
         $api = Invoke-RestMethod -Uri "$base/api/" -Headers $authHeaders -TimeoutSec 15
         Write-Host "    $base -> $($api.message)"

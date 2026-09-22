@@ -30,6 +30,19 @@ function Get-ClaudeStateRoot {
     $script:ClaudeStateRoot
 }
 
+function Get-ClaudeSafeSessionKey {
+    <#
+        Filesystem-safe key for a session id, so a hostile or malformed id in a hook
+        payload cannot escape the state directory. Real ids are UUIDs.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$SessionId)
+
+    $clean = ($SessionId -replace '[^a-zA-Z0-9._-]', '').TrimStart('.')
+    if ([string]::IsNullOrWhiteSpace($clean)) { return 'unknown' }
+    if ($clean.Length -gt 96) { $clean = $clean.Substring(0, 96) }
+    $clean
+}
+
 function Get-ClaudeSessionDisplay {
     <#
         Names a session after its project folder, which is the most recognisable
@@ -54,6 +67,12 @@ function Get-ClaudeSessionDisplay {
     $name = "Claude: $folder"
     if ($name.Length -gt 120) { $name = $name.Substring(0, 117) + '...' }
 
+    # The folder name is entirely attacker-controllable - opening a directory called
+    # "{{ ... }}" is enough - so neutralise template syntax before this reaches a card.
+    if (Get-Command Remove-CopilotTemplateMarkup -ErrorAction SilentlyContinue) {
+        $name = Remove-CopilotTemplateMarkup -Text $name
+    }
+
     [pscustomobject]@{
         Name    = $name
         Machine = [Environment]::MachineName
@@ -75,7 +94,7 @@ function Write-ClaudeSessionRegistration {
         [int]$ProcessId = 0
     )
 
-    $path = Join-Path (Get-ClaudeStateRoot) "$SessionId.json"
+    $path = Join-Path (Get-ClaudeStateRoot) ((Get-ClaudeSafeSessionKey -SessionId $SessionId) + '.json')
     $existing = if (Test-Path -LiteralPath $path) {
         try { Get-Content -LiteralPath $path -Raw | ConvertFrom-Json } catch { $null }
     }
@@ -98,10 +117,19 @@ function Write-ClaudeSessionRegistration {
 
 function Get-ClaudeSessionRegistrations {
     <#
-        Returns live registrations. A session counts as live when its recorded process
-        is still running and is still a claude process; the pid check is what retires
-        entities promptly when a session exits, since Claude fires no reliable
-        "session ended" hook for every exit path.
+        Returns live registrations, and prunes dead ones as it goes.
+
+        A session counts as live when its recorded process is still a running claude
+        process; that check is what retires entities promptly on exit, since Claude
+        fires no reliable session-ended hook for every exit path.
+
+        Two things keep this cheap, because the daemon calls it on every reconcile.
+        The set of running claude pids is fetched once and then looked up by hash,
+        rather than a Get-Process per registration. And a registration that is both
+        dead and past the stale window is deleted, because nothing else would ever
+        remove it: without that, files accumulate for every session ever run and the
+        call grows without bound. Measured at 200 stale entries it cost ~350 ms a
+        call before this.
     #>
     param([switch]$IncludeStale)
 
@@ -110,19 +138,30 @@ function Get-ClaudeSessionRegistrations {
 
     $cutoff = [DateTimeOffset]::Now.AddMinutes(-$script:ClaudeSessionStaleMinutes)
 
+    $livePids = @{}
+    foreach ($process in @(Get-Process -ErrorAction SilentlyContinue |
+                           Where-Object { $_.ProcessName -match '^claude' })) {
+        $livePids[$process.Id] = $true
+    }
+
     foreach ($file in Get-ChildItem -LiteralPath $root -Filter '*.json' -File -ErrorAction SilentlyContinue) {
         $entry = try { Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json } catch { $null }
         if (-not $entry) { continue }
 
         $alive = $false
         if ($entry.ProcessId -and [int]$entry.ProcessId -gt 0) {
-            $process = Get-Process -Id ([int]$entry.ProcessId) -ErrorAction SilentlyContinue
-            $alive = ($null -ne $process -and $process.ProcessName -match '^claude')
+            $alive = $livePids.ContainsKey([int]$entry.ProcessId)
         }
 
         $fresh = $true
         if ($entry.Updated) {
             $fresh = ([DateTimeOffset]::Parse($entry.Updated) -gt $cutoff)
+        }
+
+        if (-not $IncludeStale -and -not $alive -and -not $fresh) {
+            # Dead and past the window: it is never coming back.
+            Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue
+            continue
         }
 
         if ($IncludeStale -or ($alive -and $fresh)) {
@@ -141,7 +180,7 @@ function Get-ClaudeSessionRegistrations {
 
 function Remove-ClaudeSessionRegistration {
     param([Parameter(Mandatory)][string]$SessionId)
-    $path = Join-Path (Get-ClaudeStateRoot) "$SessionId.json"
+    $path = Join-Path (Get-ClaudeStateRoot) ((Get-ClaudeSafeSessionKey -SessionId $SessionId) + '.json')
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
 }
 
@@ -158,7 +197,7 @@ function Resolve-ClaudeTranscriptPath {
     if ($KnownPath -and (Test-Path -LiteralPath $KnownPath)) { return $KnownPath }
     if (-not (Test-Path -LiteralPath $script:ClaudeProjectsRoot)) { return $null }
 
-    $match = Get-ChildItem -LiteralPath $script:ClaudeProjectsRoot -Recurse -Filter "$SessionId.jsonl" `
+    $match = Get-ChildItem -LiteralPath $script:ClaudeProjectsRoot -Recurse -Filter ((Get-ClaudeSafeSessionKey -SessionId $SessionId) + '.jsonl') `
         -File -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($match) { return $match.FullName }
     $null

@@ -58,16 +58,31 @@ try {
         -TranscriptPath (Resolve-ClaudeTranscriptPath -SessionId $sessionId -KnownPath ([string]$event.transcript_path)) `
         -WorkingDirectory $workingDirectory -ProcessId $owningPid | Out-Null
 
+    $decisionId = "$(Get-CopilotMqttNodeId -SessionId $sessionId)-$([DateTimeOffset]::Now.ToUnixTimeMilliseconds())"
+
+    # Local state first, before anything that can block. If Home Assistant is slow or
+    # down, the hook still returns promptly and the daemon arms the card from this
+    # marker once it can reach Home Assistant again.
+    Write-CopilotDecisionMarker -SessionId $sessionId -DecisionId $decisionId `
+        -Question $question -Choices $choices -Combos @() -Fields $fields -Mode $mode
+
     Write-DecisionBridgeLog -Message (
         "claude AskUserQuestion: session=$($sessionId.Substring(0,[Math]::Min(8,$sessionId.Length))) " +
         "pid=$owningPid choices=$($choices.Count) fields=$($fields.Count) mode=$mode"
     )
 
+    # Probe before committing to any Home Assistant work: Claude's own prompt must not wait on the network.
+    # A host that is gone is detected in about a second; one that answers gets a
+    # budget generous enough for discovery, the registry rename and arming.
+    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
+        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
+        Exit-Silently
+    }
+    Set-DecisionBridgeDeadline -Seconds 45
     $headers = Get-HomeAssistantHeaders
     $display = Get-ClaudeSessionDisplay -SessionId $sessionId -WorkingDirectory $workingDirectory
     $node = Get-CopilotMqttNodeId -SessionId $sessionId
     $decisionEntity = "select.${node}_decision"
-    $decisionId = "$node-$([DateTimeOffset]::Now.ToUnixTimeMilliseconds())"
 
     $exists = $false
     try {
@@ -87,8 +102,6 @@ try {
         -Machine $display.Machine -Question $question -Choices $choices `
         -Fields $fields -DecisionId $decisionId -Headers $headers | Out-Null
 
-    Write-CopilotDecisionMarker -SessionId $sessionId -DecisionId $decisionId `
-        -Question $question -Choices $choices -Combos @() -Fields $fields -Mode $mode
 
     $numbered = ''
     if ($choices.Count -gt 0) {

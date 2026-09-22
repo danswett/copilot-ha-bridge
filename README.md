@@ -195,9 +195,12 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 ```powershell
 .\tests\test-decision-args.ps1    # ask_user argument parsing and recovery
 .\tests\test-decision-retry.ps1   # HTTP retry / transient-failure classification
+.\tests\test-security.ps1         # template injection, path and topic safety, token handling
+.\tests\test-reliability.ps1      # request budget, StrictMode safety, stale-state pruning
 ```
 
 Both are plain PowerShell, need no Home Assistant, and run in a couple of seconds.
+The Claude adapter and the MCP server have their own suites — see their READMEs.
 
 ---
 
@@ -228,6 +231,17 @@ Get-Content $env:TEMP\copilot-bridge-daemon.log -Tail 20
 * **Reply length is capped at 255 characters** by Home Assistant's `text` entity.
   Use the terminal for longer answers.
 * **Multi-field questions cap at 4 fields**; larger forms fall back to a text outline.
+* **Hooks never wait on a missing Home Assistant.** Each one probes first and skips its
+  Home Assistant work if the host doesn't answer within about a second, so an outage
+  costs a moment rather than the tens of seconds the retry layer would otherwise spend.
+  The question is still recorded locally and the daemon arms the card once Home
+  Assistant is reachable again.
+* **Session names are treated as untrusted.** A Copilot session is named after its task
+  and a Claude session after its working directory, so template syntax in either is
+  neutralised before it reaches a card — otherwise a folder called `{{ ... }}` would be
+  evaluated by Home Assistant.
+* **Use HTTPS if you can.** A long-lived token is sent on every request, so over plain
+  HTTP it crosses your network in the clear. The installer warns about this.
 * The daemon idles at a few percent of one core and reconciles every ~15 s, with
   WebSocket pushes for anything latency-sensitive.
 
