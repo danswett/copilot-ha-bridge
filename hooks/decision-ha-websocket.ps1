@@ -520,6 +520,34 @@ function Save-CopilotSessionDashboard {
 
     $sessionSections = foreach ($session in $Sessions) {
         $node = $session.Node
+
+        # An MCP client publishes only a decision, a reply and a status - it never
+        # sees a transcript, so there is no activity, no per-field dropdowns and no
+        # submit button. Rendering it with the full template would produce six
+        # "Entity not found" rows, so it gets a reduced card instead.
+        $isMcp = ($session.PSObject.Properties.Name -contains 'Kind' -and [string]$session.Kind -eq 'mcp')
+        if ($isMcp) {
+            @{
+                type = 'grid'
+                square = $false
+                columns = 1
+                cards = @(
+                    @{
+                        type = 'markdown'
+                        content = "### 🔌 $($session.Name)`n*MCP client* &bull; {{ states('sensor.${node}_status') }}"
+                    }
+                    @{
+                        type = 'entities'
+                        entities = @(
+                            @{ entity = "select.${node}_decision"; name = 'Answer' }
+                            @{ entity = "text.${node}_reply"; name = 'Reply' }
+                        )
+                    }
+                )
+            }
+            continue
+        }
+
         $statusEntity = "sensor.${node}_status"
         $activityEntity = "sensor.${node}_activity"
         $decisionEntity = "select.${node}_decision"

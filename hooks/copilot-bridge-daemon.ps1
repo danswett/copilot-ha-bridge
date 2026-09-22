@@ -230,6 +230,62 @@ function Get-LiveCodexSessions {
     $live
 }
 
+function Get-LiveMcpSessions {
+    <#
+        Live MCP clients, discovered from their Home Assistant entities.
+
+        The MCP server is a separate process on any operating system, so there is no
+        registration file or process to inspect. Its entities are the only evidence it
+        exists - and they are sufficient, because it publishes them on connect and
+        withdraws them on disconnect, so presence is liveness.
+
+        These sessions are deliberately thin. An MCP server never sees a transcript
+        and cannot originate a turn, so it publishes a decision, a reply and a status
+        and nothing else; the dashboard renders them with a reduced card for that
+        reason.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Headers)
+
+    $live = @{}
+    try {
+        $states = Invoke-DecisionHttpRequest -Parameters @{
+            Method = 'Get'
+            Uri = "$($script:DecisionBridgeConfig.HomeAssistantBaseUrl)/api/states"
+            Headers = $Headers
+            TimeoutSec = 15
+        }
+    }
+    catch {
+        return $live
+    }
+
+    foreach ($state in @($states)) {
+        $entityId = [string]$state.entity_id
+        if ($entityId -notmatch '^select\.(mcp_[a-z0-9]+)_decision$') { continue }
+        $node = $Matches[1]
+
+        $name = [string]$state.attributes.friendly_name
+        if ([string]::IsNullOrWhiteSpace($name)) { $name = 'MCP client' }
+        # The friendly name is "<device> Decision"; the device is the useful part.
+        $name = ($name -replace '\s+Decision$', '')
+        if (Get-Command Remove-CopilotTemplateMarkup -ErrorAction SilentlyContinue) {
+            $name = Remove-CopilotTemplateMarkup -Text $name
+        }
+
+        # The node doubles as the id: these sessions are addressed only by entity.
+        $live[$node] = [pscustomobject]@{
+            SessionId  = $node
+            ProcessId  = 0
+            Transcript = ''
+            Node       = $node
+            Name       = $name
+            LastWrite  = [DateTime]::UtcNow
+            Kind       = 'mcp'
+        }
+    }
+    $live
+}
+
 function Get-LiveBridgeSessions {
     <# Every live session across the front ends the bridge supports. #>
     $live = Get-LiveCopilotSessions
@@ -1362,6 +1418,20 @@ function Sync-DaemonSessions {
                 Node = Get-CopilotMqttNodeId -SessionId $id
                 Name = $entry.Name
                 Machine = $entry.Machine
+                Kind = if ($entry.PSObject.Properties.Name -contains 'Kind' -and $entry.Kind) { [string]$entry.Kind } else { 'copilot' }
+            }
+        }
+        # MCP clients join here and nowhere else. They are deliberately kept out of
+        # $State and out of Get-LiveBridgeSessions: the MCP server owns those entities
+        # and withdraws them itself, so a daemon that adopted them would eventually
+        # "retire" a live client's entities out from under it. Rendering is the only
+        # thing the daemon should do with them.
+        foreach ($mcp in (Get-LiveMcpSessions -Headers $Headers).Values) {
+            [pscustomobject]@{
+                Node = $mcp.Node
+                Name = $mcp.Name
+                Machine = ''
+                Kind = 'mcp'
             }
         }
     )

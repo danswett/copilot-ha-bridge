@@ -32,6 +32,13 @@ function cardFor(node, title) {
 export async function ensureDashboard(ha, node, title, urlPath = DEFAULT_URL_PATH) {
   const socket = await ha.connectSocket();
   try {
+    // When the PowerShell daemon is installed it owns copilot-decisions and renders
+    // every session it can see, including MCP clients, with a reduced card. Creating
+    // a second dashboard in that case would put two sidebar entries in front of the
+    // user for what is one feature, so this defers instead.
+    const managed = await socket.send({ type: 'lovelace/config', url_path: 'copilot-decisions' });
+    if (managed.success) return 'managed';
+
     let config = null;
     const existing = await socket.send({ type: 'lovelace/config', url_path: urlPath });
     if (existing.success) config = existing.result;
