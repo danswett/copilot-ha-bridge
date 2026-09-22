@@ -983,10 +983,26 @@ function Get-CopilotSessionDisplay {
 
 
 function Get-CopilotDecisionMarkerPath {
+    <#
+        Resolves the pending-decision marker for a session.
+
+        Copilot sessions keep it beside their session state. Other front ends - Claude
+        Code, for instance - have no such folder, so those fall back to a bridge-owned
+        directory. All three marker helpers go through here, so the hook that writes a
+        marker and the daemon that consumes it always agree on the location.
+    #>
     param([Parameter(Mandatory)][string]$SessionId)
-    Join-Path (
-        Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
-    ) 'copilot-pending-decision.json'
+
+    $sessionDirectory = Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
+    if (Test-Path -LiteralPath $sessionDirectory) {
+        return Join-Path $sessionDirectory 'copilot-pending-decision.json'
+    }
+
+    $fallback = Join-Path (Join-Path $env:TEMP 'copilot-bridge-markers') $SessionId
+    if (-not (Test-Path -LiteralPath $fallback)) {
+        New-Item -ItemType Directory -Path $fallback -Force | Out-Null
+    }
+    Join-Path $fallback 'copilot-pending-decision.json'
 }
 
 function Write-CopilotDecisionMarker {

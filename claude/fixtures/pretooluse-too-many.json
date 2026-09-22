@@ -1,0 +1,17 @@
+{
+  "session_id": "9f8e7d6c-5b4a-4392-8172-6a5b4c3d2e1f",
+  "transcript_path": "C:\\Users\\example\\.claude\\projects\\-c-repo\\9f8e7d6c-5b4a-4392-8172-6a5b4c3d2e1f.jsonl",
+  "cwd": "C:\\repo",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "AskUserQuestion",
+  "permission_mode": "acceptEdits",
+  "tool_input": {
+    "questions": [
+      { "question": "Language?", "header": "Lang", "options": [{ "label": "Go" }, { "label": "Rust" }] },
+      { "question": "Runtime?", "header": "Runtime", "options": [{ "label": "Node" }, { "label": "Deno" }] },
+      { "question": "Database?", "header": "DB", "options": [{ "label": "Postgres" }, { "label": "MySQL" }] },
+      { "question": "Cache?", "header": "Cache", "options": [{ "label": "Redis" }, { "label": "None" }] },
+      { "question": "Host?", "header": "Host", "options": [{ "label": "Fly" }, { "label": "AWS" }] }
+    ]
+  }
+}
