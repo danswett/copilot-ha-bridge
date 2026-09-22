@@ -1169,6 +1169,15 @@ function Start-BridgeDaemon {
     $live = Get-LiveCopilotSessions
 
     Write-DaemonLog -Message "daemon starting (pid $PID), $($live.Count) live session(s)"
+
+    # Provision the dashboard's Live Verbose helper before anything renders it.
+    if (Initialize-CopilotVerboseToggle) {
+        Write-DaemonLog -Message "verbose toggle ready ($($script:DaemonConfig.VerboseToggle))"
+    }
+    else {
+        Write-DaemonLog -Message 'verbose toggle unavailable; streaming defaults to quiet'
+    }
+
     Clear-CopilotMqttOrphans -Headers $headers -Live $live
 
     # Prime every live session's status and activity up front. Persisted state makes

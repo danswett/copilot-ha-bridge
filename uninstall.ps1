@@ -45,6 +45,7 @@ if ($ClearEntities) {
     try {
         . (Join-Path $hooksDir 'decision-bridge-common.ps1')
         . (Join-Path $hooksDir 'decision-mqtt.ps1')
+        . (Join-Path $hooksDir 'decision-ha-websocket.ps1')
         $headers = Get-HomeAssistantHeaders
         $root = $script:DecisionBridgeConfig.SessionStateRoot
         if (Test-Path -LiteralPath $root) {
@@ -52,7 +53,33 @@ if ($ClearEntities) {
                 try { Remove-CopilotMqttSession -SessionId $_.Name -Headers $headers } catch { }
             }
         }
-        Write-Host '    cleared'
+        Write-Host '    session entities cleared'
+
+        # The daemon creates these two; without removing them Home Assistant keeps a
+        # dead dashboard and an orphaned toggle after everything else is gone.
+        try {
+            if (Remove-CopilotVerboseToggle) { Write-Host '    removed the Live Verbose toggle' }
+        }
+        catch { Write-Warning "Could not remove the verbose toggle: $($_.Exception.Message)" }
+
+        try {
+            $urlPath = $script:DecisionBridgeConfig.DashboardUrlPath
+            if ($urlPath) {
+                [void](Invoke-CopilotHaWebSocket -Commands @(@{
+                    type = 'lovelace/config/delete'; url_path = $urlPath
+                }))
+                Write-Host "    removed the '$urlPath' dashboard view"
+            }
+        }
+        catch {
+            # Already absent is the desired end state, not a failure.
+            if ($_.Exception.Message -match 'config_not_found') {
+                Write-Host "    dashboard '$urlPath' already absent"
+            }
+            else {
+                Write-Warning "Could not remove the dashboard: $($_.Exception.Message)"
+            }
+        }
     }
     catch {
         Write-Warning "Could not clear entities: $($_.Exception.Message)"

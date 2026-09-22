@@ -294,6 +294,99 @@ function Set-CopilotMqttGlobalEntityId {
     $true
 }
 
+function Initialize-CopilotVerboseToggle {
+    <#
+        Ensures input_boolean.copilot_cli_live_verbose exists.
+
+        The dashboard's Live Verbose control targets this helper, but nothing else
+        creates it, so a fresh install would render an "Entity not found" row. There
+        is no config flow to hang this off — the bridge is a set of Windows scripts,
+        not a Home Assistant integration — so it self-provisions here instead, using
+        the input_boolean collection API over the WebSocket.
+
+        Home Assistant slugifies the helper name into the id, so the name below must
+        stay in sync with $DaemonConfig.VerboseToggle. Creating a storage-backed
+        helper (rather than POSTing a bare state) is what makes the toggle survive a
+        Home Assistant restart.
+
+        Returns $true when the helper exists afterwards.
+    #>
+    param(
+        [string]$HelperId = 'copilot_cli_live_verbose',
+        [string]$Name = 'Copilot CLI Live Verbose',
+        [string]$Icon = 'mdi:brain'
+    )
+
+    try {
+        $existing = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'input_boolean/list' }))[0]
+        if (@($existing) | Where-Object { [string]$_.id -eq $HelperId }) {
+            # Present in storage is not proof of a working entity: if the entity_id was
+            # previously occupied by a bare state object, the helper can register
+            # without ever materialising a state. Recreate it when that happens.
+            if (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId") { return $true }
+            [void](Invoke-CopilotHaWebSocket -Commands @(@{
+                type = 'input_boolean/delete'; input_boolean_id = $HelperId
+            }))
+            Start-Sleep -Seconds 2
+        }
+
+        $created = (Invoke-CopilotHaWebSocket -Commands @(@{
+            type = 'input_boolean/create'
+            name = $Name
+            icon = $Icon
+        }))[0]
+
+        # Guard the name->id assumption rather than trusting the slug: a mismatch
+        # would leave the dashboard pointing at an entity that does not exist.
+        if ([string]$created.id -ne $HelperId) {
+            Write-Warning "Created verbose toggle as '$($created.id)', expected '$HelperId'."
+            return $false
+        }
+        return (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId")
+    }
+    catch {
+        Write-Warning "Could not ensure the verbose toggle: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Test-CopilotHelperHasState {
+    <#
+        True when the entity is present in the state machine. A helper can exist in
+        storage and in the entity registry yet have no state, which renders on a
+        dashboard as an unavailable row.
+    #>
+    param([Parameter(Mandatory)][string]$EntityId)
+
+    foreach ($attempt in 1..5) {
+        Start-Sleep -Milliseconds 800
+        try {
+            # A missing entity is a 404, which the retry layer treats as permanent and
+            # rethrows immediately, so this stays fast.
+            $state = Get-HomeAssistantState -EntityId $EntityId -Headers (Get-HomeAssistantHeaders)
+            if ($null -ne $state -and $state.state) { return $true }
+        }
+        catch { }
+    }
+    return $false
+}
+
+function Remove-CopilotVerboseToggle {
+    <#
+        Deletes the verbose toggle helper. Used by uninstall so the bridge does not
+        leave a dead control behind in Home Assistant.
+    #>
+    param([string]$HelperId = 'copilot_cli_live_verbose')
+
+    $existing = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'input_boolean/list' }))[0]
+    if (-not (@($existing) | Where-Object { [string]$_.id -eq $HelperId })) { return $false }
+    [void](Invoke-CopilotHaWebSocket -Commands @(@{
+        type = 'input_boolean/delete'
+        input_boolean_id = $HelperId
+    }))
+    return $true
+}
+
 function Save-CopilotSessionDashboard {
     <#
         Regenerates the copilot-decisions dashboard for the per-session MQTT model.
@@ -585,7 +678,11 @@ ha-card {
     }
 
     [void](Invoke-CopilotHaWebSocket -Commands @(
-        @{ type = 'lovelace/config/save'; url_path = 'copilot-decisions'; config = $config }
+        @{
+            type = 'lovelace/config/save'
+            url_path = $script:DecisionBridgeConfig.DashboardUrlPath
+            config = $config
+        }
     ))
 }
 
