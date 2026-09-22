@@ -26,6 +26,10 @@
     build without touching a working install; $HOME is read-only in PowerShell, so it
     cannot be redirected any other way.
 
+.PARAMETER SkipVerify
+    Skip the Home Assistant connectivity check. Use for an offline install, or when
+    the token comes from an environment variable that is not set yet.
+
 .EXAMPLE
     .\install.ps1 -HomeAssistantUrl http://homeassistant.local:8123 -Token 'eyJ...'
 
@@ -40,6 +44,7 @@ param(
     [string]$NotifyService,
     [string]$TickerCategory,
     [string]$TargetHome,
+    [switch]$SkipVerify,
     [switch]$SkipTask
 )
 
@@ -110,6 +115,56 @@ $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encodi
 Write-Host "    baseUrl      : $($config.homeAssistant.baseUrl)"
 Write-Host "    token        : $(if ($config.homeAssistant.token) { 'set in config' } else { "from `$env:$($config.homeAssistant.tokenEnvVar)" })"
 Write-Host "    notifications: $(if ($config.notifications.enabled) { $config.notifications.service } else { 'disabled' })"
+
+# ------------------------------------------------------------------- preflight
+# Without this the installer happily reports success and the bridge only fails much
+# later, from a hook or the daemon, where the cause is far less obvious.
+if ($SkipVerify) {
+    Write-Step 'Skipping the Home Assistant check (-SkipVerify)'
+}
+else {
+    Write-Step 'Verifying Home Assistant'
+    $effectiveToken = $config.homeAssistant.token
+    if (-not $effectiveToken -and $config.homeAssistant.tokenEnvVar) {
+        $effectiveToken = [Environment]::GetEnvironmentVariable($config.homeAssistant.tokenEnvVar)
+    }
+
+    if (-not $effectiveToken) {
+        throw ("No Home Assistant token. Re-run with -Token '<long-lived token>', " +
+               "or set `$env:$($config.homeAssistant.tokenEnvVar), or pass -SkipVerify " +
+               'to finish the install and configure it later.')
+    }
+
+    $base = $config.homeAssistant.baseUrl.TrimEnd('/')
+    $authHeaders = @{ Authorization = "Bearer $effectiveToken"; 'Content-Type' = 'application/json' }
+
+    try {
+        $api = Invoke-RestMethod -Uri "$base/api/" -Headers $authHeaders -TimeoutSec 15
+        Write-Host "    $base -> $($api.message)"
+    }
+    catch {
+        throw ("Could not reach Home Assistant at $base : $($_.Exception.Message)`n" +
+               '    Check -HomeAssistantUrl and that the token is valid, or pass -SkipVerify.')
+    }
+
+    # The MQTT integration is the one prerequisite the bridge cannot provision itself:
+    # every per-session entity is published through the mqtt.publish service.
+    try {
+        $services = Invoke-RestMethod -Uri "$base/api/services" -Headers $authHeaders -TimeoutSec 20
+        $mqtt = @($services) | Where-Object { $_.domain -eq 'mqtt' }
+        if ($mqtt -and $mqtt.services.PSObject.Properties.Name -contains 'publish') {
+            Write-Host '    mqtt.publish available'
+        }
+        else {
+            Write-Warning ('Home Assistant has no mqtt.publish service. Add the MQTT ' +
+                           'integration (Settings > Devices & Services > Add Integration > MQTT) ' +
+                           'or the bridge cannot create its entities.')
+        }
+    }
+    catch {
+        Write-Warning "Could not list Home Assistant services: $($_.Exception.Message)"
+    }
+}
 
 # ---------------------------------------------------------------- hook config
 Write-Step "Merging Copilot hook definitions"
