@@ -129,6 +129,7 @@ function Get-LiveCopilotSessions {
             ProcessId = $processId
             Transcript = $transcript
             LastWrite = [IO.File]::GetLastWriteTimeUtc($transcript)
+            Kind = 'copilot'
         }
     }
 
@@ -145,6 +146,119 @@ function Get-LiveCopilotSessions {
     }
 
     $live
+}
+
+# ---------------------------------------------------------------- front ends
+# Sessions carry a Kind so the daemon can serve more than one CLI. Everything
+# Copilot-specific stays on the 'copilot' path unchanged; 'claude' sessions are
+# discovered, streamed and answered through the helpers below. The Claude adapter is
+# optional - when it is not installed, these degrade to returning nothing.
+
+$script:ClaudeAdapterLoaded = $false
+$claudeHooks = Join-Path $HOME '.claude\ha-bridge'
+if (Test-Path -LiteralPath (Join-Path $claudeHooks 'claude-session.ps1')) {
+    try {
+        . (Join-Path $claudeHooks 'claude-session.ps1')
+        . (Join-Path $claudeHooks 'claude-transcript.ps1')
+        $script:ClaudeAdapterLoaded = $true
+    }
+    catch {
+        $script:ClaudeAdapterLoaded = $false
+    }
+}
+
+function Get-LiveClaudeSessions {
+    <#
+        Live Claude Code sessions, from the registrations its hooks write.
+
+        Claude has no inuse.<pid>.lock, so liveness is the recorded pid still being a
+        running claude process - established in Get-ClaudeSessionRegistrations.
+    #>
+    if (-not $script:ClaudeAdapterLoaded) { return @{} }
+
+    $live = @{}
+    foreach ($registration in @(Get-ClaudeSessionRegistrations)) {
+        if (-not $registration.IsLive) { continue }
+        $transcript = $registration.TranscriptPath
+        if (-not $transcript -or -not (Test-Path -LiteralPath $transcript)) { continue }
+
+        $live[$registration.SessionId] = [pscustomobject]@{
+            SessionId        = $registration.SessionId
+            ProcessId        = $registration.ProcessId
+            Transcript       = $transcript
+            WorkingDirectory = $registration.WorkingDirectory
+            LastWrite        = [IO.File]::GetLastWriteTimeUtc($transcript)
+            Kind             = 'claude'
+        }
+    }
+    $live
+}
+
+function Get-LiveBridgeSessions {
+    <# Every live session across the front ends the bridge supports. #>
+    $live = Get-LiveCopilotSessions
+    foreach ($entry in (Get-LiveClaudeSessions).GetEnumerator()) {
+        $live[$entry.Key] = $entry.Value
+    }
+    $live
+}
+
+function Get-BridgeSessionDisplay {
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [string]$Kind = 'copilot',
+        [string]$WorkingDirectory = 'Unknown folder'
+    )
+
+    if ($Kind -eq 'claude' -and $script:ClaudeAdapterLoaded) {
+        return Get-ClaudeSessionDisplay -SessionId $SessionId -WorkingDirectory $WorkingDirectory
+    }
+    Get-CopilotSessionDisplay -SessionId $SessionId -WorkingDirectory $WorkingDirectory
+}
+
+function Read-BridgeTranscriptAppend {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [long]$Offset = 0,
+        [string]$Kind = 'copilot'
+    )
+
+    if ($Kind -eq 'claude' -and $script:ClaudeAdapterLoaded) {
+        return Read-ClaudeTranscriptAppend -Path $Path -Offset $Offset `
+            -MaxTailBytes $script:DaemonConfig.MaxTailBytes
+    }
+    Read-TranscriptAppend -Path $Path -Offset $Offset
+}
+
+function Get-BridgeActivity {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Lines,
+        [Parameter(Mandatory)][bool]$VerboseMode,
+        [string]$Kind = 'copilot'
+    )
+
+    if ($Kind -eq 'claude' -and $script:ClaudeAdapterLoaded) {
+        return Get-ClaudeActivityFromTranscript -Lines $Lines -VerboseMode $VerboseMode
+    }
+    Get-ActivityFromEvents -Lines $Lines -VerboseMode $VerboseMode
+}
+
+function Test-BridgeSessionWorking {
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [string]$Kind = 'copilot',
+        [string]$Transcript
+    )
+
+    if ($Kind -ne 'claude') { return Test-CopilotSessionWorking -SessionId $SessionId }
+    if (-not $script:ClaudeAdapterLoaded -or -not $Transcript) { return $false }
+
+    # Claude writes no turn-end entry, so freshness is the best available signal at
+    # adoption time; the Stop hook corrects it authoritatively at the next turn end.
+    try {
+        return ([DateTime]::UtcNow - [IO.File]::GetLastWriteTimeUtc($Transcript)).TotalSeconds -lt 20
+    }
+    catch { return $false }
 }
 
 function Read-DaemonState {
@@ -781,7 +895,7 @@ function Sync-DaemonSessions {
         [Parameter(Mandatory)][hashtable]$State
     )
 
-    $live = Get-LiveCopilotSessions
+    $live = Get-LiveBridgeSessions
     $verbose = Test-VerboseStreaming -Headers $Headers
 
     # Note sessions that have exited, and drop them from state now, but defer removing
@@ -801,7 +915,11 @@ function Sync-DaemonSessions {
         $entry = $State[$id]
 
         if ($null -eq $entry) {
-            $display = Get-CopilotSessionDisplay -SessionId $id -WorkingDirectory 'Unknown folder'
+            $kind = if ($session.PSObject.Properties.Name -contains 'Kind') { [string]$session.Kind } else { 'copilot' }
+            $workingDirectory = if ($session.PSObject.Properties.Name -contains 'WorkingDirectory' -and $session.WorkingDirectory) {
+                [string]$session.WorkingDirectory
+            } else { 'Unknown folder' }
+            $display = Get-BridgeSessionDisplay -SessionId $id -Kind $kind -WorkingDirectory $workingDirectory
             $node = Get-CopilotMqttNodeId -SessionId $id
 
             # Only publish the entity set if it does not already exist. The ask_user
@@ -863,7 +981,7 @@ function Sync-DaemonSessions {
                 Write-DaemonLog -Message "provisioning failed for $id : $($_.Exception.Message)"
             }
 
-            $initialStatus = if (Test-CopilotSessionWorking -SessionId $id) { 'working' } else { 'idle' }
+            $initialStatus = if (Test-BridgeSessionWorking -SessionId $id -Kind $kind -Transcript $session.Transcript) { 'working' } else { 'idle' }
             $initialActivity = if ($initialStatus -eq 'working') { 'Working' } else { 'Idle' }
             try {
                 Set-CopilotMqttStatus -SessionId $id -Status $initialStatus -Headers $Headers -Attributes @{
@@ -888,16 +1006,18 @@ function Sync-DaemonSessions {
                 Name = $display.Name
                 Machine = $display.Machine
                 Status = $initialStatus
+                Kind = $kind
             }
             $State[$id] = $entry
             continue
         }
 
-        $append = Read-TranscriptAppend -Path $session.Transcript -Offset ([long]$entry.Offset)
+        $entryKind = if ($entry.PSObject.Properties.Name -contains 'Kind' -and $entry.Kind) { [string]$entry.Kind } else { 'copilot' }
+        $append = Read-BridgeTranscriptAppend -Path $session.Transcript -Offset ([long]$entry.Offset) -Kind $entryKind
         $entry.Offset = $append.Offset
         if ($append.Lines.Count -eq 0) { continue }
 
-        $activity = Get-ActivityFromEvents -Lines $append.Lines -VerboseMode $verbose
+        $activity = Get-BridgeActivity -Lines $append.Lines -VerboseMode $verbose -Kind $entryKind
 
         if (-not [string]::IsNullOrWhiteSpace($activity.Status) -and
             $activity.Status -ne [string]$entry.Status) {
@@ -1119,7 +1239,14 @@ function Invoke-DaemonReply {
     )
 
     $short = $SessionId.Substring(0, [Math]::Min(8, $SessionId.Length))
-    $delivery = Send-CopilotSessionPrompt -SessionId $SessionId -Text $Text
+
+    # Claude Code leaves no inuse.<pid>.lock, so its owning process is passed
+    # explicitly from the registration the hooks maintain.
+    $explicitPid = 0
+    $claudeSession = (Get-LiveClaudeSessions)[$SessionId]
+    if ($null -ne $claudeSession) { $explicitPid = [int]$claudeSession.ProcessId }
+
+    $delivery = Send-CopilotSessionPrompt -SessionId $SessionId -Text $Text -ProcessId $explicitPid
     if ($delivery.Delivered) {
         Write-DaemonLog -Message "reply delivered to $short (pid $($delivery.ProcessId)): $($delivery.Detail)"
     }
@@ -1166,7 +1293,7 @@ function Start-BridgeDaemon {
     # longer live, which both removes its Home Assistant entities and drops it from
     # state. Pruning first would discard the record while leaving the published
     # entities behind as orphans.
-    $live = Get-LiveCopilotSessions
+    $live = Get-LiveBridgeSessions
 
     Write-DaemonLog -Message "daemon starting (pid $PID), $($live.Count) live session(s)"
 
@@ -1267,7 +1394,7 @@ function Start-BridgeDaemon {
         if (([DateTimeOffset]::Now - $lastReconcile).TotalSeconds -ge $ReconcileSeconds -or
             $null -ne $hit) {
             try {
-                $live = Get-LiveCopilotSessions
+                $live = Get-LiveBridgeSessions
                 Sync-DaemonSessions -Headers $headers -State $state
                 Repair-CopilotSessionEntities -Headers $headers -State $state -Live $live
                 Invoke-PendingDecisions -Headers $headers -State $state -Live $live

@@ -1,0 +1,13 @@
+{
+  "session_id": "4961c53c-e89d-4666-a3b5-c2439c1ab1ce",
+  "transcript_path": "C:\\Users\\example\\.claude\\projects\\C--scratch\\4961c53c-e89d-4666-a3b5-c2439c1ab1ce.jsonl",
+  "cwd": "C:\\scratch",
+  "prompt_id": "p1",
+  "permission_mode": "default",
+  "effort": "medium",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "sample.txt contains a single line reading \"hello from the scratch file.\"",
+  "background_tasks": [],
+  "session_crons": []
+}

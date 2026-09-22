@@ -1,0 +1,7 @@
+{
+  "session_id": "5b2e8a01-77cd-4f32-9e44-1c3d5f6a7b88",
+  "transcript_path": "",
+  "cwd": "C:\\scratch",
+  "hook_event_name": "Notification",
+  "message": "Claude needs your permission to run: git push --force"
+}

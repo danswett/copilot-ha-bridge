@@ -355,7 +355,12 @@ function Send-CopilotSessionPrompt {
 
         # Pause between the text burst and the Enter keystroke, long enough for the
         # CLI to treat the text as a finished paste so the following Enter submits.
-        [int]$SubmitDelayMs = 300
+        [int]$SubmitDelayMs = 300,
+
+        # Explicit target process, for front ends that do not leave an
+        # inuse.<pid>.lock behind. Claude Code sessions are identified by walking the
+        # hook's parent chain instead, and the daemon already knows the result.
+        [int]$ProcessId = 0
     )
 
     $result = [pscustomobject]@{
@@ -369,7 +374,7 @@ function Send-CopilotSessionPrompt {
         return $result
     }
 
-    $processId = Get-CopilotSessionProcessId -SessionId $SessionId
+    $processId = if ($ProcessId -gt 0) { $ProcessId } else { Get-CopilotSessionProcessId -SessionId $SessionId }
     if ($null -eq $processId) {
         $result.Detail = 'no live process for session'
         return $result

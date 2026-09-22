@@ -233,7 +233,25 @@ Get-Content $env:TEMP\copilot-bridge-daemon.log -Tail 20
 
 ---
 
-## Other clients (experimental)
+## Other clients
+
+### Claude Code — full support
+
+[`claude/`](claude/) adds the same experience to Claude Code: live activity,
+chain-of-thought, a reply box that types into the real terminal, and a card when it
+needs you. Claude Code exposes the same four primitives this bridge is built on —
+`PreToolUse` with a matcher, a `Stop` hook, JSONL transcripts, and a real console — so
+it gets the full stack rather than a subset.
+
+```powershell
+cd claude
+.\install-claude.ps1
+```
+
+See [`claude/README.md`](claude/README.md), which states exactly what is verified
+against a live session and what is not.
+
+### Anything else, via MCP (experimental)
 
 [`mcp/`](mcp/) holds a separate MCP server that brings the *ask* half of this to
 Claude Desktop and other MCP clients, on any OS. It races a Home Assistant card

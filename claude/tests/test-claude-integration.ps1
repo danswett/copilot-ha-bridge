@@ -143,6 +143,44 @@ try {
     $bad = '{not json'
     $out = $bad | & pwsh -NoProfile -File $router 2>&1
     Test-That 'the hook still exits 0' { $LASTEXITCODE -eq 0 } "exit $LASTEXITCODE"
+
+    Write-Host '--- a Notification surfaces the session as waiting ---'
+    $notifier = Join-Path $PSScriptRoot '..\hooks\route-notification.ps1'
+    $notifyRaw = Get-Content (Join-Path $fixtures 'notification.json') -Raw
+    $notifyOut = $notifyRaw | & pwsh -NoProfile -File $notifier 2>&1
+    $notifySession = ($notifyRaw | ConvertFrom-Json).session_id
+    $touched.Add($notifySession)
+    Test-That 'the hook exits 0 silently' {
+        $LASTEXITCODE -eq 0 -and (($notifyOut | Out-String).Trim() -eq '')
+    } "exit $LASTEXITCODE"
+
+    Start-Sleep -Seconds 4
+    $notifyNode = Get-CopilotMqttNodeId -SessionId $notifySession
+    $status = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_status" -Headers $headers } catch { $null }
+    $activity = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_activity" -Headers $headers } catch { $null }
+    Test-That 'the status reads waiting' { $status.state -eq 'waiting' } (($status.state) ?? 'missing')
+    Test-That 'the activity carries what Claude is asking for' {
+        $activity.state -match 'git push'
+    } (($activity.state) ?? 'missing')
+
+    Write-Host '--- Stop marks the turn idle and uses last_assistant_message ---'
+    $stopHook = Join-Path $PSScriptRoot '..\hooks\notify-claude-stop.ps1'
+    # Reuse the notified session, which already has entities, so the idle transition
+    # is observable.
+    $stopEvent = Get-Content (Join-Path $fixtures 'stop-event.json') -Raw | ConvertFrom-Json
+    $stopEvent.session_id = $notifySession
+    $stopOut = ($stopEvent | ConvertTo-Json -Depth 6) | & pwsh -NoProfile -File $stopHook 2>&1
+    Test-That 'the Stop hook exits 0 silently' {
+        $LASTEXITCODE -eq 0 -and (($stopOut | Out-String).Trim() -eq '')
+    } "exit $LASTEXITCODE"
+
+    Start-Sleep -Seconds 4
+    $statusAfter = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_status" -Headers $headers } catch { $null }
+    $activityAfter = try { Get-HomeAssistantState -EntityId "sensor.${notifyNode}_activity" -Headers $headers } catch { $null }
+    Test-That 'the session goes idle' { $statusAfter.state -eq 'idle' } (($statusAfter.state) ?? 'missing')
+    Test-That 'the response comes from last_assistant_message' {
+        $activityAfter.state -match 'hello from the scratch file'
+    } (($activityAfter.state) ?? 'missing')
 }
 finally {
     Write-Host '--- cleanup ---'
