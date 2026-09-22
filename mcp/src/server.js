@@ -37,6 +37,7 @@ import {
 } from './entities.js';
 import { describeSchema, outlineFor, valueForLabel } from './schema.js';
 import { DEFAULT_URL_PATH, ensureDashboard, removeFromDashboard } from './dashboard.js';
+import { startHttpTransport } from './http.js';
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -56,6 +57,18 @@ function loadConfig() {
     // Set HA_DASHBOARD='' to manage cards yourself.
     dashboard:
       process.env.HA_DASHBOARD === undefined ? DEFAULT_URL_PATH : process.env.HA_DASHBOARD,
+    // stdio unless asked otherwise: the client starts the server, nothing listens,
+    // and there is nothing to secure.
+    transport: (process.env.MCP_TRANSPORT || 'stdio').toLowerCase(),
+    httpHost: process.env.MCP_HTTP_HOST || '127.0.0.1',
+    httpPort: Number(process.env.MCP_HTTP_PORT) || 8808,
+    httpToken: process.env.MCP_HTTP_TOKEN || '',
+    httpPath: process.env.MCP_HTTP_PATH || '/mcp',
+    // Extra Host header values to accept, for a tunnel or reverse proxy in front.
+    httpAllowedHosts: (process.env.MCP_HTTP_ALLOWED_HOSTS || '')
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter(Boolean),
   };
 }
 
@@ -249,7 +262,19 @@ async function main() {
   // hang off that too - otherwise every run leaks a retained discovery config.
   process.stdin.on('close', shutdown);
 
-  await server.connect(new StdioServerTransport());
+  if (config.transport === 'http') {
+    const { transport } = await startHttpTransport({
+      host: config.httpHost,
+      port: config.httpPort,
+      token: config.httpToken,
+      path: config.httpPath,
+      allowedHosts: config.httpAllowedHosts,
+    });
+    await server.connect(transport);
+  }
+  else {
+    await server.connect(new StdioServerTransport());
+  }
 
   // Burn outbound request id 0.
   //

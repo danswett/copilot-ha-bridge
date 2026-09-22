@@ -75,8 +75,69 @@ Claude Desktop — add to `claude_desktop_config.json`:
 | `HA_TIMEOUT_MS` | How long to wait for an answer (default 30 min) |
 | `HA_DASHBOARD` | Fallback dashboard when the daemon is absent (default `copilot-mcp`; set to empty to manage cards yourself) |
 
-ChatGPT needs Developer Mode on a Business/Enterprise/Edu workspace and a reachable
-HTTP endpoint; this server speaks stdio, so it would need an HTTP transport first.
+## Remote clients (HTTP transport)
+
+By default the server speaks **stdio**: the application starts it, nothing listens on
+a port, and there is nothing to attack. Clients that can't start a local process —
+ChatGPT being the obvious one — need HTTP instead:
+
+```json
+"env": {
+  "MCP_TRANSPORT": "http",
+  "MCP_HTTP_TOKEN": "a-long-random-string",
+  "HA_BASE_URL": "http://homeassistant.local:8123",
+  "HA_TOKEN": "eyJ..."
+}
+```
+
+| Variable | Meaning |
+|---|---|
+| `MCP_TRANSPORT` | `stdio` (default) or `http` |
+| `MCP_HTTP_HOST` | Interface to bind (default `127.0.0.1` — this machine only) |
+| `MCP_HTTP_PORT` | Port (default `8808`) |
+| `MCP_HTTP_TOKEN` | Bearer token required on every request |
+| `MCP_HTTP_PATH` | Endpoint path (default `/mcp`) |
+| `MCP_HTTP_ALLOWED_HOSTS` | Extra `Host` header values to accept, comma-separated — needed when a tunnel or reverse proxy is in front |
+
+### Why it is locked down by default
+
+This server holds a Home Assistant **long-lived access token**, and Home Assistant has
+no way to scope one: a token that can arm a dashboard card can also unlock a door.
+Reaching this endpoint therefore means full control of the Home Assistant instance,
+which is a much bigger prize than the MCP tool itself suggests. So:
+
+* it binds **`127.0.0.1`** unless told otherwise, so nothing off the machine can reach
+  it;
+* every request needs `Authorization: Bearer $MCP_HTTP_TOKEN`, compared in constant
+  time;
+* it **refuses to start** on a non-local interface with no token, rather than warning
+  and carrying on — the one mistake that would expose the token is the one it will not
+  let you make;
+* DNS-rebinding protection is on, so a web page you visit can't drive it through your
+  browser.
+
+### Exposing it deliberately
+
+Don't widen `MCP_HTTP_HOST` to `0.0.0.0` and forward a port. Leave the bind local and
+put a tunnel in front of it, so the listener is never directly addressable:
+
+* [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+  — `cloudflared tunnel --url http://127.0.0.1:8808`, ideally behind Cloudflare Access
+* [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) — `tailscale funnel 8808`
+
+**A tunnel needs its hostname declared.** DNS-rebinding protection matches the `Host`
+header exactly, so traffic arriving as `something.trycloudflare.com` is rejected with
+`403 Invalid Host header` until you say otherwise:
+
+```
+MCP_HTTP_ALLOWED_HOSTS=something.trycloudflare.com
+```
+
+Keep `MCP_HTTP_TOKEN` set: the tunnel provides transport security and a stable
+hostname, the token provides authentication, and you want both.
+
+ChatGPT additionally needs **Developer Mode** on a Business, Enterprise or Edu
+workspace before it will accept a custom connector.
 
 ## Installing only this
 
@@ -112,6 +173,18 @@ A real MCP client drives a real server against a real Home Assistant and checks 
 halves of the race: the app answering, and Home Assistant answering while the app's
 prompt gets cancelled. `node test/sweep.js` clears any entities left by an
 interrupted run.
+
+The HTTP transport has its own suite, which needs no Home Assistant:
+
+```bash
+npm run test:http
+```
+
+`test-http.js` asserts the security properties directly — local-bind detection, the
+refusal to start unauthenticated on a public interface, and rejection of missing,
+wrong and wrong-length tokens. `test-http-e2e.js` then starts `server.js` the way a
+user would and drives it with a real MCP client over the network, so the transport is
+proven wired in rather than merely importable.
 
 ## Notes
 

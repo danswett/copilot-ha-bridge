@@ -7,7 +7,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "test": "node test/harness.js"
+    "test": "node test/harness.js",
+    "test:http": "node test/test-http.js && node test/test-http-e2e.js"
   },
   "engines": {
     "node": ">=22"
