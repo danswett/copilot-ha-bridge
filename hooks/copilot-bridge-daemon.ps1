@@ -1443,11 +1443,17 @@ function Invoke-DaemonReply {
 
     $short = $SessionId.Substring(0, [Math]::Min(8, $SessionId.Length))
 
-    # Claude Code leaves no inuse.<pid>.lock, so its owning process is passed
-    # explicitly from the registration the hooks maintain.
+    # Claude and Codex leave no inuse.<pid>.lock, so their owning process is passed
+    # explicitly from the registration their hooks maintain. Without this the
+    # injector falls back to the Copilot-only lock file, finds nothing, and the reply
+    # box fails silently - which is worse than not offering one.
     $explicitPid = 0
     $claudeSession = (Get-LiveClaudeSessions)[$SessionId]
     if ($null -ne $claudeSession) { $explicitPid = [int]$claudeSession.ProcessId }
+    if ($explicitPid -le 0) {
+        $codexSession = (Get-LiveCodexSessions)[$SessionId]
+        if ($null -ne $codexSession) { $explicitPid = [int]$codexSession.ProcessId }
+    }
 
     $delivery = Send-CopilotSessionPrompt -SessionId $SessionId -Text $Text -ProcessId $explicitPid
     if ($delivery.Delivered) {
