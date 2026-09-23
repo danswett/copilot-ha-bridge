@@ -99,6 +99,16 @@ try {
         $null -eq $refreshed -or $refreshed.Tag -ne 'v9.9.9'
     } $(if ($null -ne $refreshed) { $refreshed.Tag } else { 'null' })
 
+    Write-Host '--- the check interval controls how often GitHub is polled ---'
+    [pscustomobject]@{
+        CheckedAt = [DateTimeOffset]::Now.AddHours(-2).ToString('o')
+        Release   = [pscustomobject]@{ Tag = 'v9.9.9'; Url = 'x'; Zip = 'x'; Notes = ''; Name = ''; Published = '' }
+    } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cachePath -Encoding UTF8
+    Test-That 'a wide interval reuses a 2h-old cache' { (Get-BridgeLatestRelease -CheckHours 24).Tag -eq 'v9.9.9' }
+    # A refetch hits the mocked (offline) network and returns null, proving a shorter
+    # interval re-polls rather than trusting the cache.
+    Test-That 'a short interval re-polls a 2h-old cache' { $null -eq (Get-BridgeLatestRelease -CheckHours 1) }
+
     Write-Host '--- failure is survivable ---'
     Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
     $script:DecisionBridgeConfig.UpdateRepositoryOverride = $null

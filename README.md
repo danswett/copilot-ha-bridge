@@ -188,7 +188,8 @@ never in the repo). See [`config.example.json`](config.example.json).
 | `notifications.enabled` / `.service` | Optional notify-style service |
 | `copilot.sessionStateRoot` | Override session-state location if not `~/.copilot/session-state` |
 | `updates.repository` | Repository to check for releases (default `danswett/copilot-ha-bridge`) |
-| `updates.checkForUpdates` | Set to `false` to disable the daily update check |
+| `updates.checkForUpdates` | Set to `false` to disable the update check |
+| `updates.checkHours` | How often to check GitHub for a release (default `6`, i.e. 4×/day) |
 
 Prefer keeping the token out of a file? Leave `token` empty and set `COPILOT_HA_TOKEN`
 in your environment.

@@ -5,10 +5,10 @@
 .DESCRIPTION
     Installs are a clone plus install.ps1, so without this there is no way to learn
     that a newer version exists short of watching the repository. The daemon checks
-    GitHub's releases once a day and publishes the result as a Home Assistant `update`
-    entity, which is the native surface for exactly this: it shows the installed and
-    latest versions, links the release notes, and appears in Home Assistant's own
-    Updates list.
+    GitHub's releases a few times a day and publishes the result as a Home Assistant
+    `update` entity, which is the native surface for exactly this: it shows the
+    installed and latest versions, links the release notes, and appears in Home
+    Assistant's own Updates list.
 
     The update entity is published **without** a command topic on purpose. Home
     Assistant sends an MQTT install command that nothing here is subscribed to, and it
@@ -25,9 +25,10 @@ Set-StrictMode -Version Latest
 
 $script:BridgeUpdateConfig = @{
     CacheFile     = Join-Path $env:TEMP 'copilot-bridge-update.json'
-    # A day is frequent enough to be useful and leaves the unauthenticated GitHub
-    # rate limit (60/hour/IP) almost untouched.
-    CheckHours    = 24
+    # How often to check GitHub for a new release. Four times a day catches a release
+    # within a few hours and still barely touches the unauthenticated GitHub rate
+    # limit (60/hour/IP). Tunable with updates.checkHours in the config.
+    CheckHours    = [double](Get-BridgeSetting 'updates.checkHours' 6)
     UserAgent     = 'copilot-ha-bridge'
     RequestTimeout = 15
 }
@@ -78,7 +79,7 @@ function Get-BridgeLatestRelease {
     #>
     param(
         [switch]$Force,
-        [int]$CheckHours = $script:BridgeUpdateConfig.CheckHours
+        [double]$CheckHours = $script:BridgeUpdateConfig.CheckHours
     )
 
     $cachePath = $script:BridgeUpdateConfig.CacheFile
