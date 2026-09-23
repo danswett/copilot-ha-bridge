@@ -671,6 +671,84 @@ function Clear-CopilotMqttDecisionFields {
         -Machine $Machine -Fields @() -Headers $Headers
 }
 
+function Set-CopilotMqttSelectOption {
+    <#
+        Drives an optimistic MQTT select to a value, waiting until Home Assistant has
+        actually ingested the discovery config that carries that value.
+
+        The MQTT select platform fixes its option list at configuration time, and
+        `select.select_option` rejects anything outside that list with a
+        ServiceValidationError. Discovery is asynchronous: the retained config goes to
+        the broker, Home Assistant consumes it, and only then does the entity carry the
+        new options. Publishing and then immediately selecting is therefore a race.
+
+        This used to be a flat `Start-Sleep -Milliseconds 600`. Under load that is not
+        enough: the call lands while the entity still holds the *previous* option list,
+        and Home Assistant logs
+
+            Option 'Awaiting answer...' is not valid for entity
+            select.<node>_decision, valid options are: Idle
+
+        once per attempt (30 in one observed 24h window). The exception was caught and
+        ignored, so the card still carried the question in its attributes - but the
+        selector's state stayed 'unknown', which the dashboard cannot tell apart from an
+        idle card, so the Answer control was hidden exactly when it was needed.
+
+        Polling for the option to appear fixes it in both directions and is usually
+        *faster* than the old fixed sleep, because it returns as soon as the entity is
+        ready instead of always paying 600 ms. The wait is bounded; on timeout the
+        select is still attempted, since that costs nothing beyond the log line the
+        caller already tolerated.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [string]$EntityId,
+
+        [Parameter(Mandatory)]
+        [string]$Option,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Headers,
+
+        [ValidateRange(1, 40)]
+        [int]$Attempts = 12,
+
+        [ValidateRange(25, 2000)]
+        [int]$DelayMs = 150
+    )
+
+    $ready = $false
+    foreach ($attempt in 1..$Attempts) {
+        try {
+            $state = Get-HomeAssistantState -EntityId $EntityId -Headers $Headers
+            if ($null -ne $state -and (@($state.attributes.options) -contains $Option)) {
+                $ready = $true
+                break
+            }
+        }
+        catch {
+            # A missing entity is a 404, which the retry layer rethrows immediately
+            # rather than treating as transient. Discovery simply has not registered it
+            # yet, so keep waiting rather than giving up.
+        }
+        if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds $DelayMs }
+    }
+
+    try {
+        Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers -Data @{
+            entity_id = $EntityId
+            option    = $Option
+        }
+    }
+    catch {
+        # Non-fatal by design: the attributes already carry (or have already cleared)
+        # the question, so a failed state nudge costs only the dashboard's Answer
+        # control, never the answer itself.
+    }
+
+    return $ready
+}
+
 function Set-CopilotMqttDecision {
     <#
         Arms the decision selector with a question.
@@ -749,16 +827,8 @@ function Set-CopilotMqttDecision {
     # Drive it to the placeholder so the state itself says "a question is waiting" -
     # the dashboard keys the Answer control off that, and 'unknown' would otherwise be
     # indistinguishable from an idle card.
-    Start-Sleep -Milliseconds 600
-    try {
-        Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers -Data @{
-            entity_id = "select.${node}_decision"
-            option = 'Awaiting answer...'
-        }
-    }
-    catch {
-        # Non-fatal: the card still carries the question in its attributes.
-    }
+    Set-CopilotMqttSelectOption -EntityId "select.${node}_decision" `
+        -Option 'Awaiting answer...' -Headers $Headers | Out-Null
 
     # Publish the per-field dropdowns for a multi-field question, and collapse them
     # for a single-field one so a previous question's fields never linger.
@@ -852,16 +922,8 @@ function Clear-CopilotMqttDecision {
     # Drive the optimistic selector to 'Idle' so its state, not just its attributes,
     # reflects that nothing is waiting. The dashboard shows the Answer control only
     # when the state is something other than Idle.
-    Start-Sleep -Milliseconds 600
-    try {
-        Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers -Data @{
-            entity_id = "select.${node}_decision"
-            option = 'Idle'
-        }
-    }
-    catch {
-        # Non-fatal: the cleared attributes already hide the question.
-    }
+    Set-CopilotMqttSelectOption -EntityId "select.${node}_decision" `
+        -Option 'Idle' -Headers $Headers | Out-Null
 
     # Collapse any per-field dropdowns from a multi-field question.
     try {
