@@ -593,7 +593,7 @@ if ($selectedClients -contains 'mcp') {
     Write-Host '        (Claude Desktop was configured automatically if present). See mcp/README.md for ChatGPT/HTTP.'
     $stepNo++
 }
-Write-Host "  $stepNo. Open the Copilot Decisions dashboard in Home Assistant."
+Write-Host "  $stepNo. Open the Agent Sessions dashboard in Home Assistant."
 Write-Host "     Logs: `$env:TEMP\copilot-bridge-daemon.log and copilot-decision-bridge.log"
 if ($selectedClients -notcontains 'mcp') {
     Write-Host ''

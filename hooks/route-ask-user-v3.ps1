@@ -114,7 +114,7 @@ try {
             ''
             ($numbered -join "`n")
             ''
-            'Answer in the terminal or on the Copilot Decisions dashboard.'
+            'Answer in the terminal or on the Agent Sessions dashboard.'
         ) -join "`n"
     }
     else {
@@ -124,7 +124,7 @@ try {
             ''
             $question
             ''
-            'Answer in the terminal or in the Reply box on the Copilot Decisions dashboard.'
+            'Answer in the terminal or in the Reply box on the Agent Sessions dashboard.'
         ) -join "`n"
     }
     if ($body.Length -gt 950) { $body = $body.Substring(0, 947) + '...' }

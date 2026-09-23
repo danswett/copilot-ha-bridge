@@ -58,6 +58,7 @@ jobs:
             'tests/test-decision-args.ps1'
             'tests/test-decision-retry.ps1'
             'tests/test-bridge-adapter.ps1'
+            'tests/test-dashboard.ps1'
             'tests/test-install-clients.ps1'
             'tests/test-reliability.ps1'
             'tests/test-restart-restore.ps1'

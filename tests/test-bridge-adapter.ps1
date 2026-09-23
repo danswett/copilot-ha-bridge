@@ -136,10 +136,10 @@ Test-That 'a long response is truncated with a pointer to the dashboard' {
 }
 Reset-Calls
 Send-BridgeResponseNotification -SessionName 'MyProj' -Response ('z' * 1000) -Headers $headers `
-    -TitlePrefix 'Copilot response' -DashboardLabel 'the Copilot Decisions dashboard'
+    -TitlePrefix 'Copilot response' -DashboardLabel 'the Agent Sessions dashboard'
 Test-That 'a custom title prefix and dashboard label are honoured' {
     $script:Calls.Notify[0].Title -eq 'Copilot response: MyProj' -and
-    $script:Calls.Notify[0].Message.EndsWith('Full response is on the Copilot Decisions dashboard.')
+    $script:Calls.Notify[0].Message.EndsWith('Full response is on the Agent Sessions dashboard.')
 }
 
 Write-Host ''

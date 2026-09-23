@@ -59,7 +59,7 @@ try {
 
     Send-BridgeResponseNotification -SessionName $display.Name -Response $response `
         -Headers (Get-HomeAssistantHeaders) -TitlePrefix 'Copilot response' `
-        -DashboardLabel 'the Copilot Decisions dashboard'
+        -DashboardLabel 'the Agent Sessions dashboard'
 }
 catch {
     try {

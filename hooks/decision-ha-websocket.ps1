@@ -500,13 +500,16 @@ function Save-CopilotSessionDashboard {
 
     $liveTemplate = "{{ states('sensor.copilot_cli_sessions') }}"
     $pendingTemplate = "{% set dc = [$decisionList] %}{{ dc | map('states') | reject('in',['Idle','unavailable','unknown','']) | list | count }}"
+    # The installed version comes from the update entity, which the daemon always
+    # publishes, so the card shows what is running without another moving part.
+    $installedTemplate = "{{ state_attr('update.copilot_cli_update', 'installed_version') or '?' }}"
 
     $controlMarkdown = @{
         type = 'markdown'
         content = @(
             '## Agent sessions'
             ''
-            "**Live sessions:** $liveTemplate &bull; **Pending decisions:** $pendingTemplate"
+            "**Live sessions:** $liveTemplate &bull; **Pending decisions:** $pendingTemplate &bull; **Bridge** $installedTemplate"
             ''
             'Turn on *Live Verbose* to stream each session''s reasoning and every tool call.'
         ) -join "`n"
@@ -798,9 +801,9 @@ ha-card {
     # columns by height instead, so cards of very different lengths - which is normal
     # here, since a card carries a whole response - sit flush against each other.
     $config = @{
-        title = 'Copilot Decisions'
+        title = 'Agent Sessions'
         views = @(@{
-            title = 'Decisions'
+            title = 'Sessions'
             path = 'decision'
             type = 'masonry'
             cards = @($controlCards) + $sessionSections
