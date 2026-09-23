@@ -313,7 +313,7 @@ function Get-CopilotSessionProcessId {
         [string]$SessionId
     )
 
-    $dir = Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
+    $dir = Join-Path $script:DecisionBridgeConfig.SessionStateRoot (Get-CopilotSafeSessionKey -SessionId $SessionId)
     if (-not (Test-Path -LiteralPath $dir)) {
         return $null
     }
@@ -331,6 +331,21 @@ function Get-CopilotSessionProcessId {
     }
 
     $null
+}
+
+function Get-CopilotInjectableText {
+    <#
+        Reduces a reply to text that is safe to type into a live terminal.
+
+        Every control character - newlines, carriage returns, tab, escape, backspace,
+        and the other C0/C1 controls - is collapsed to a space. That keeps a reply
+        typed on the dashboard to printable text only: it can never submit an extra
+        line into the CLI, nor smuggle a terminal control/escape sequence that drives
+        the UI. Submission is done deliberately by a separate Enter keystroke.
+    #>
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    $Text -replace '\p{Cc}', ' '
 }
 
 function Send-CopilotSessionPrompt {
@@ -381,7 +396,7 @@ function Send-CopilotSessionPrompt {
     }
     $result.ProcessId = $processId
 
-    $clean = ($Text -replace "`r`n", ' ') -replace "[`r`n]", ' '
+    $clean = Get-CopilotInjectableText -Text $Text
 
     try {
         Initialize-CopilotConsoleInjector
@@ -524,7 +539,7 @@ function Send-CopilotSessionChoice {
     }
     $result.ProcessId = $processId
 
-    $clean = ($Text -replace "`r`n", ' ') -replace "[`r`n]", ' '
+    $clean = Get-CopilotInjectableText -Text $Text
     # A couple of extra Downs guarantee the caret reaches the trailing "Other" entry
     # even if the prompt adds an option the bridge did not know about.
     $downs = [Math]::Max(1, $ChoiceCount + 2)

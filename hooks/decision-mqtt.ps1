@@ -46,7 +46,13 @@ function Get-CopilotMqttNodeId {
 
     $clean = ($SessionId -replace '[^a-zA-Z0-9]', '')
     if ([string]::IsNullOrWhiteSpace($clean)) {
-        $clean = 'unknown'
+        # An id with no alphanumerics would otherwise collapse to a single shared
+        # 'unknown' node, colliding every such session onto one card and topic set.
+        # Derive a short stable hash of the raw id so distinct ids stay distinct. Real
+        # ids are UUIDs and never reach this branch, so their node ids are unchanged
+        # and existing entities are undisturbed.
+        $bytes = [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes([string]$SessionId))
+        $clean = ([System.BitConverter]::ToString($bytes) -replace '-', '').Substring(0, 12)
     }
     if ($clean.Length -gt 16) {
         $clean = $clean.Substring(0, 16)

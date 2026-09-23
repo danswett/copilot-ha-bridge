@@ -22,6 +22,7 @@ $ErrorActionPreference = 'Stop'
 
 . (Join-Path $PSScriptRoot '..\hooks\decision-bridge-common.ps1')
 . (Join-Path $PSScriptRoot '..\hooks\decision-mqtt.ps1')
+. (Join-Path $PSScriptRoot '..\hooks\decision-inject.ps1')
 . (Join-Path $PSScriptRoot '..\claude\hooks\claude-session.ps1')
 
 $script:Failures = 0
@@ -88,6 +89,59 @@ foreach ($candidate in @('a/b/#', 'x+y', '../evil', 'node id')) {
     Test-That "mqtt-safe: '$candidate' -> '$node'" {
         $node -match '^[a-zA-Z0-9_]+$'
     } $node
+}
+
+Write-Host '--- session-derived filesystem paths cannot escape the session-state root ---'
+$sroot = Join-Path ([System.IO.Path]::GetTempPath()) ("bridge-sec-" + [Guid]::NewGuid().ToString('N'))
+$rootDir = Join-Path $sroot 'root'
+$evilDir = Join-Path $sroot 'evil'
+New-Item -ItemType Directory -Path $rootDir, $evilDir -Force | Out-Null
+# A transcript OUTSIDE the root that, if reachable by traversal, would read as working.
+Set-Content -LiteralPath (Join-Path $evilDir 'events.jsonl') -Value '{"type":"assistant.turn_start"}' -Encoding UTF8
+$origRoot = $script:DecisionBridgeConfig.SessionStateRoot
+$script:DecisionBridgeConfig.SessionStateRoot = $rootDir
+try {
+    Test-That 'a traversal id cannot read an events.jsonl outside the root' {
+        -not (Test-CopilotSessionWorking -SessionId '..\evil')
+    }
+    Test-That 'a traversal id resolves no owning process' {
+        $null -eq (Get-CopilotSessionProcessId -SessionId '..\evil')
+    }
+    $liveDir = Join-Path $rootDir 'sess-live'
+    New-Item -ItemType Directory -Path $liveDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $liveDir 'events.jsonl') -Value '{"type":"assistant.turn_start"}' -Encoding UTF8
+    Test-That 'a normal in-root session is still detected as working' {
+        Test-CopilotSessionWorking -SessionId 'sess-live'
+    }
+}
+finally {
+    $script:DecisionBridgeConfig.SessionStateRoot = $origRoot
+    Remove-Item -LiteralPath $sroot -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host '--- an injected reply is reduced to printable characters ---'
+Test-That 'newlines cannot submit an extra line' {
+    (Get-CopilotInjectableText -Text "line1`nline2") -eq 'line1 line2'
+}
+Test-That 'escape, backspace and tab controls are stripped' {
+    (Get-CopilotInjectableText -Text "a$([char]27)b$([char]8)c$([char]9)d") -eq 'a b c d'
+}
+Test-That 'no control character survives' {
+    (Get-CopilotInjectableText -Text "x$([char]0)$([char]13)$([char]7)y") -notmatch '\p{Cc}'
+}
+Test-That 'printable text is preserved unchanged' {
+    (Get-CopilotInjectableText -Text 'yes, option 2 (do it)') -eq 'yes, option 2 (do it)'
+}
+
+Write-Host '--- MQTT node ids stay distinct for degenerate ids and stable for real ones ---'
+Test-That 'a real UUID node id is unchanged by the hardening' {
+    (Get-CopilotMqttNodeId -SessionId '0f5c1a2e-9b44-4d31-8c77-2a1f6b3e0d55') -eq 'copilot_0f5c1a2e9b444d31'
+}
+Test-That 'two distinct all-symbol ids do not collide on one node' {
+    (Get-CopilotMqttNodeId -SessionId '###') -ne (Get-CopilotMqttNodeId -SessionId '@@@')
+}
+Test-That 'a degenerate id still yields a valid node id' {
+    (Get-CopilotMqttNodeId -SessionId '///') -match '^copilot_[a-z0-9]+$'
 }
 
 Write-Host '--- token handling ---'

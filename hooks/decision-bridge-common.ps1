@@ -1051,8 +1051,12 @@ function Get-CopilotSessionDisplay {
     # Prefixed to match the Claude and Codex adapters, so a shared dashboard shows at
     # a glance which front end each card belongs to.
     $name = "Copilot: $($SessionId.Substring(0, [Math]::Min(8, $SessionId.Length)))"
+    # Resolve the session directory through the filesystem-safe key, never the raw id:
+    # a crafted id must not be able to walk out of the session-state root and read an
+    # arbitrary workspace.yaml.
+    $safeKey = Get-CopilotSafeSessionKey -SessionId $SessionId
     $workspacePath = Join-Path (
-        Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
+        Join-Path $script:DecisionBridgeConfig.SessionStateRoot $safeKey
     ) 'workspace.yaml'
 
     if (Test-Path -LiteralPath $workspacePath) {
@@ -1313,8 +1317,9 @@ function Test-CopilotSessionWorking {
         [string]$SessionId
     )
 
+    $safeKey = Get-CopilotSafeSessionKey -SessionId $SessionId
     $eventsPath = Join-Path (
-        Join-Path $script:DecisionBridgeConfig.SessionStateRoot $SessionId
+        Join-Path $script:DecisionBridgeConfig.SessionStateRoot $safeKey
     ) 'events.jsonl'
     if (-not (Test-Path -LiteralPath $eventsPath)) {
         return $false
