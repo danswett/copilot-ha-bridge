@@ -79,6 +79,64 @@ Test-That 'blank summary falls back to a label' { $card.Summary -eq 'Working' }
 Test-That 'blank reasoning is not published' { -not $card.Detail.ContainsKey('reasoning') }
 Test-That 'blank response is not published' { -not $card.Detail.ContainsKey('response') }
 
+Write-Host '--- state persistence is atomic, backed up, and recovers from corruption ---'
+$tmpDir = Join-Path ([System.IO.Path]::GetTempPath()) ("bridge-state-test-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+$stateFile = Join-Path $tmpDir 'state.json'
+$origStateFile = $script:DaemonConfig.StateFile
+$script:DaemonConfig.StateFile = $stateFile
+$script:DaemonStateLastWritten = $null
+try {
+    Write-DaemonState -State @{ sess1 = @{ Offset = 5 } }
+    Test-That 'the state file is written' { Test-Path -LiteralPath $stateFile }
+    Test-That 'no temp file is left behind' { -not (Test-Path -LiteralPath "$stateFile.tmp") }
+    Test-That 'the state round-trips' { [int](Read-DaemonState)['sess1'].Offset -eq 5 }
+
+    # A second, different write creates a last-good backup of the prior content.
+    Write-DaemonState -State @{ sess1 = @{ Offset = 9 } }
+    Test-That 'a backup is created on change' { Test-Path -LiteralPath "$stateFile.bak" }
+    Test-That 'the backup holds the previous content' { (Get-Content -LiteralPath "$stateFile.bak" -Raw) -match '"Offset":5' }
+    Test-That 'the primary holds the new content' { [int](Read-DaemonState)['sess1'].Offset -eq 9 }
+
+    # Corruption of the primary recovers from the backup instead of blanking cards.
+    Set-Content -LiteralPath $stateFile -Value '{ this is not valid json' -Encoding UTF8
+    Test-That 'a corrupt primary recovers the backup' { [int](Read-DaemonState)['sess1'].Offset -eq 5 }
+
+    # Corrupt with no usable backup, and a missing file, are both empty (not a throw).
+    Remove-Item -LiteralPath "$stateFile.bak" -Force
+    Set-Content -LiteralPath $stateFile -Value 'still not json' -Encoding UTF8
+    Test-That 'a corrupt primary with no backup is empty' { (Read-DaemonState).Count -eq 0 }
+    Remove-Item -LiteralPath $stateFile -Force
+    Test-That 'a missing state file is empty' { (Read-DaemonState).Count -eq 0 }
+
+    # The dirty flag skips an unchanged write and honours a changed one.
+    $script:DaemonStateLastWritten = $null
+    Write-DaemonState -State @{ sess1 = @{ Offset = 7 } }
+    Set-Content -LiteralPath $stateFile -Value 'SENTINEL' -Encoding UTF8
+    Write-DaemonState -State @{ sess1 = @{ Offset = 7 } }
+    Test-That 'an unchanged write is skipped' { (Get-Content -LiteralPath $stateFile -Raw).Trim() -eq 'SENTINEL' }
+    Write-DaemonState -State @{ sess1 = @{ Offset = 8 } }
+    Test-That 'a changed write is not skipped' { [int](Read-DaemonState)['sess1'].Offset -eq 8 }
+}
+finally {
+    $script:DaemonConfig.StateFile = $origStateFile
+    Remove-Item -LiteralPath $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host '--- the MCP discovery scan is cached within its TTL ---'
+$script:McpScanCalls = 0
+function Invoke-DecisionHttpRequest { param($Parameters) $script:McpScanCalls++; @() }
+$script:DaemonMcpCache = $null
+$script:DaemonMcpCacheAt = [DateTimeOffset]::MinValue
+$mcpHeaders = @{ Authorization = 'Bearer test' }
+$null = Get-LiveMcpSessions -Headers $mcpHeaders
+$null = Get-LiveMcpSessions -Headers $mcpHeaders
+$null = Get-LiveMcpSessions -Headers $mcpHeaders
+Test-That 'the /api/states scan runs once within the TTL' { $script:McpScanCalls -eq 1 }
+$script:DaemonMcpCacheAt = [DateTimeOffset]::Now.AddSeconds(-9999)
+$null = Get-LiveMcpSessions -Headers $mcpHeaders
+Test-That 'an expired cache triggers a fresh scan' { $script:McpScanCalls -eq 2 }
+
 Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) check(s) failed" -ForegroundColor Red

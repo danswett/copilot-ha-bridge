@@ -54,6 +54,14 @@ $script:DaemonConfig = @{
     ActivityHistory = 12
     ResponseMaxChars = 6000
     ReasoningMaxChars = 4000
+    # Re-publish the global status at least this often even when the live set is
+    # unchanged, so a Home Assistant restart that drops retained values re-establishes
+    # the count within a bounded window. Between re-asserts an unchanged set is silent.
+    GlobalReassertSeconds = 300
+    # MCP-client presence changes slowly and only affects rendering (the MCP server
+    # owns its own decision entities), so its full /api/states discovery scan is cached
+    # for this long rather than repeated on every reconcile.
+    McpScanCacheSeconds = 60
     # Home Assistant renders a text entity holding "" as the literal "(empty value)".
     # A single space renders as a genuinely blank field instead, so the reply box looks
     # ready to type in. Everything that reads the box treats whitespace as empty.
@@ -63,6 +71,23 @@ $script:DaemonConfig = @{
 # Session-set signature of the last dashboard rebuild, so the dashboard is only
 # regenerated when a session appears or exits, not on every reconcile.
 $script:DaemonDashboardSignature = $null
+
+# Serialised state of the last successful state-file write, so an idle daemon skips
+# rewriting identical JSON every reconcile. Initialised for StrictMode.
+$script:DaemonStateLastWritten = $null
+
+# Content signature and timestamp of the last global-status publish, so the three
+# global MQTT messages are only re-sent when the live set changes or a re-assert
+# interval elapses, instead of on every reconcile. Initialised for StrictMode.
+$script:DaemonGlobalSignature = $null
+$script:DaemonGlobalLastPublish = [DateTimeOffset]::MinValue
+
+# Short-lived cache of the MCP-client discovery scan (a full /api/states read) and
+# a consecutive-failure counter for the WebSocket watch backoff. Initialised for
+# StrictMode.
+$script:DaemonMcpCache = $null
+$script:DaemonMcpCacheAt = [DateTimeOffset]::MinValue
+$script:DaemonWatchFailures = 0
 
 # Update-check state. Initialised here rather than left undefined because the daemon
 # runs under StrictMode, where reading an unset variable throws.
@@ -250,6 +275,15 @@ function Get-LiveMcpSessions {
     #>
     param([Parameter(Mandatory)][hashtable]$Headers)
 
+    # Serve the cached scan while it is fresh. MCP presence changes slowly and only
+    # affects the global count and dashboard card - the MCP server publishes and
+    # withdraws its own decision entities - so a short TTL avoids a full O(all HA
+    # entities) /api/states read on every reconcile.
+    if ($null -ne $script:DaemonMcpCache -and
+        ([DateTimeOffset]::Now - $script:DaemonMcpCacheAt).TotalSeconds -lt $script:DaemonConfig.McpScanCacheSeconds) {
+        return $script:DaemonMcpCache
+    }
+
     $live = @{}
     try {
         $states = Invoke-DecisionHttpRequest -Parameters @{
@@ -260,6 +294,9 @@ function Get-LiveMcpSessions {
         }
     }
     catch {
+        # Show the last known set on a transient scan failure rather than flapping the
+        # count to zero; a still-expired cache is retried on the next reconcile.
+        if ($null -ne $script:DaemonMcpCache) { return $script:DaemonMcpCache }
         return $live
     }
 
@@ -287,6 +324,8 @@ function Get-LiveMcpSessions {
             Kind       = 'mcp'
         }
     }
+    $script:DaemonMcpCache = $live
+    $script:DaemonMcpCacheAt = [DateTimeOffset]::Now
     $live
 }
 
@@ -394,12 +433,17 @@ function Test-BridgeSessionWorking {
     catch { return $false }
 }
 
-function Read-DaemonState {
-    if (-not (Test-Path -LiteralPath $script:DaemonConfig.StateFile)) {
-        return @{}
-    }
+function Read-DaemonStateFile {
+    <#
+        Parses one state file into a hashtable. Returns @{} for an empty file (a
+        legitimately empty state) and $null when the file cannot be read or parsed,
+        so the caller can distinguish "no sessions" from "corrupt" and fall back to
+        the last-good backup rather than discarding every persisted card.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
     try {
-        $raw = Get-Content -LiteralPath $script:DaemonConfig.StateFile -Raw -Encoding UTF8
+        $raw = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
         if ([string]::IsNullOrWhiteSpace($raw)) { return @{} }
         $parsed = $raw | ConvertFrom-Json
         $state = @{}
@@ -409,8 +453,30 @@ function Read-DaemonState {
         return $state
     }
     catch {
+        return $null
+    }
+}
+
+function Read-DaemonState {
+    $stateFile = $script:DaemonConfig.StateFile
+    if (-not (Test-Path -LiteralPath $stateFile)) {
         return @{}
     }
+
+    $state = Read-DaemonStateFile -Path $stateFile
+    if ($null -ne $state) { return $state }
+
+    # The primary file exists but is unreadable or malformed - most likely a write
+    # was interrupted by a crash or power loss. Recover the last-good backup instead
+    # of silently starting empty, which would blank every session's restored card.
+    $backup = "$stateFile.bak"
+    if (Test-Path -LiteralPath $backup) {
+        Write-DaemonLog -Message "state file is corrupt; restoring from backup '$backup'"
+        $state = Read-DaemonStateFile -Path $backup
+        if ($null -ne $state) { return $state }
+    }
+    Write-DaemonLog -Message "state file '$stateFile' is corrupt and no usable backup exists; starting from empty state"
+    return @{}
 }
 
 function Write-DaemonState {
@@ -418,10 +484,32 @@ function Write-DaemonState {
 
     try {
         $json = $State | ConvertTo-Json -Depth 8 -Compress
-        Set-Content -LiteralPath $script:DaemonConfig.StateFile -Value $json -Encoding UTF8
+    }
+    catch {
+        Write-DaemonLog -Message "state serialize failed: $($_.Exception.Message)"
+        return
+    }
+
+    # Skip the write when nothing changed, so an idle daemon is not serialising and
+    # rewriting the same JSON to disk on every reconcile (flash wear and idle I/O).
+    if ($json -eq $script:DaemonStateLastWritten) { return }
+
+    $stateFile = $script:DaemonConfig.StateFile
+    $temp = "$stateFile.tmp"
+    try {
+        Set-Content -LiteralPath $temp -Value $json -Encoding UTF8
+        # Preserve the current good file as a backup, then atomically replace the
+        # target by rename. A crash can therefore only ever leave a stale-but-valid
+        # target plus a partial .tmp, never a truncated target with no fallback.
+        if (Test-Path -LiteralPath $stateFile) {
+            Copy-Item -LiteralPath $stateFile -Destination "$stateFile.bak" -Force -ErrorAction SilentlyContinue
+        }
+        [System.IO.File]::Move($temp, $stateFile, $true)
+        $script:DaemonStateLastWritten = $json
     }
     catch {
         Write-DaemonLog -Message "state save failed: $($_.Exception.Message)"
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -1527,13 +1615,24 @@ function Sync-DaemonSessions {
         }
     )
 
-    try {
-        Publish-CopilotMqttGlobalStatus -Headers $Headers -Sessions @(
-            $descriptors | ForEach-Object { @{ name = $_.Name; machine = $_.Machine; node = $_.Node } }
-        )
-    }
-    catch {
-        Write-DaemonLog -Message "global status publish failed: $($_.Exception.Message)"
+    # The global count sensor only needs re-publishing when the live set (names,
+    # machines, nodes) changes, or periodically as a re-assert against a Home
+    # Assistant restart dropping retained state. Republishing three retained messages
+    # every reconcile - each stamped with a fresh 'updated' time that defeats payload
+    # equality - was needless idle traffic and MQTT churn.
+    $globalSignature = ($descriptors | ForEach-Object { "$($_.Node)=$($_.Name)=$($_.Machine)" }) -join '|'
+    $globalStale = ([DateTimeOffset]::Now - $script:DaemonGlobalLastPublish).TotalSeconds -ge $script:DaemonConfig.GlobalReassertSeconds
+    if ($globalSignature -ne $script:DaemonGlobalSignature -or $globalStale) {
+        try {
+            Publish-CopilotMqttGlobalStatus -Headers $Headers -Sessions @(
+                $descriptors | ForEach-Object { @{ name = $_.Name; machine = $_.Machine; node = $_.Node } }
+            )
+            $script:DaemonGlobalSignature = $globalSignature
+            $script:DaemonGlobalLastPublish = [DateTimeOffset]::Now
+        }
+        catch {
+            Write-DaemonLog -Message "global status publish failed: $($_.Exception.Message)"
+        }
     }
 
     # The card header carries the session name, so a rename has to rebuild the
@@ -1882,10 +1981,16 @@ function Start-BridgeDaemon {
         try {
             $hit = Wait-CopilotHaStateChange -EntityIds $watchEntities `
                 -TimeoutSeconds $ReconcileSeconds
+            $script:DaemonWatchFailures = 0
         }
         catch {
-            Write-DaemonLog -Message "watch failed: $($_.Exception.Message)"
-            Start-Sleep -Seconds 2
+            # A normal timeout returns $null and is not an error; only a genuine
+            # connection failure lands here. Back off exponentially (capped) so a
+            # Home Assistant outage does not spin a tight reconnect loop.
+            $script:DaemonWatchFailures++
+            $backoff = [int][Math]::Min(2 * [Math]::Pow(2, $script:DaemonWatchFailures - 1), 60)
+            Write-DaemonLog -Message "watch failed (attempt $($script:DaemonWatchFailures)): $($_.Exception.Message); retrying in ${backoff}s"
+            Start-Sleep -Seconds $backoff
         }
 
         # A verbose toggle change refreshes every card's reasoning at once, without
