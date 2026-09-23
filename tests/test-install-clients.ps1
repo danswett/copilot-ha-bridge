@@ -37,7 +37,7 @@ function Test-That {
 
 Write-Host '--- ConvertTo-BridgeClientList ---'
 Test-That 'passes known clients through' {
-    (ConvertTo-BridgeClientList @('copilot', 'claude', 'codex')) -join ',' -eq 'copilot,claude,codex'
+    (ConvertTo-BridgeClientList @('copilot', 'claude', 'codex', 'mcp')) -join ',' -eq 'copilot,claude,codex,mcp'
 }
 Test-That 'normalises aliases' {
     (ConvertTo-BridgeClientList @('GitHub', 'claude-code', 'codex-cli')) -join ',' -eq 'copilot,claude,codex'
@@ -81,7 +81,7 @@ Test-That 'a request beats a prompt' {
 }
 
 Write-Host '--- Test-BridgeClientInstalled returns a bool for each client ---'
-foreach ($c in @('copilot', 'claude', 'codex')) {
+foreach ($c in @('copilot', 'claude', 'codex', 'mcp')) {
     Test-That "$c detection does not throw" { (Test-BridgeClientInstalled $c) -is [bool] }
 }
 

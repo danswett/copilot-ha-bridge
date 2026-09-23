@@ -40,12 +40,14 @@ when idle.
 | **GitHub Copilot CLI** — the origin | The full experience: decisions, live activity, chain-of-thought, multi-field forms, and reply-after-the-turn. Set up by [`install.ps1`](#install). |
 | **Claude Code** | The full stack too — the same four primitives, the same card. See [`claude/`](claude/). |
 | **OpenAI Codex CLI** | Cards, live activity, command approvals, and the reasoning summary; replies are delivered back into the session. See [`codex/`](codex/). |
-| **Any MCP client** — Claude Desktop, ChatGPT, … | The *ask* half only, on any OS: a Home Assistant card races the app's own prompt and cancels whichever loses. See [`mcp/`](mcp/). |
+| **Any MCP client** — Claude Desktop, ChatGPT, … | The *ask* half only, on any OS: a Home Assistant card races the app's own prompt and cancels whichever loses. Installable from the picker (`-Clients mcp`). See [`mcp/`](mcp/). |
 
 The Windows daemon, dashboard, and Home Assistant plumbing are shared; each client is
 just a thin adapter onto them. The installer sets up the shared layer, then asks which
-of Copilot CLI, Claude Code and Codex CLI to configure (detecting which you have). MCP
-is set up separately — it's a Node server, not a hook.
+clients to configure — Copilot CLI, Claude Code, Codex CLI, and the MCP server
+(detecting what you have). The MCP option installs the Node server and writes a
+paste-ready client config (and registers Claude Desktop automatically if it's there),
+since MCP clients point at a server rather than loading a hook.
 
 ---
 
@@ -84,8 +86,9 @@ only a Home Assistant token.
 * Windows 10/11 and **PowerShell 7+**
 * At least one supported client. The installer asks which of
   **[GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli)**,
-  **Claude Code** and **Codex CLI** to configure (detecting which you have); **MCP
-  clients** are set up separately ([`mcp/`](mcp/))
+  **Claude Code**, **Codex CLI** and the **MCP server** to configure (detecting what
+  you have). MCP additionally needs **Node.js**, and works with any MCP client
+  ([`mcp/`](mcp/))
 * Home Assistant with the **MQTT integration** configured (any broker)
 * A Home Assistant **long-lived access token**
 * These HACS frontend cards:
@@ -117,18 +120,20 @@ Windows resolves natively) and confirms the product from its unauthenticated
 `manifest.json`. You confirm or correct the URL, then it walks you through creating a
 long-lived token and pastes straight into the config.
 
-It then asks **which clients to configure** — Copilot CLI, Claude Code, Codex CLI —
-pre-selecting the ones it detects. The shared daemon, dashboard and Home Assistant
-plumbing are installed either way; the choice only decides which adapters' hooks get
-registered. Pick them non-interactively with `-Clients`:
+It then asks **which clients to configure** — Copilot CLI, Claude Code, Codex CLI, and
+the MCP server — pre-selecting the ones it detects. The shared daemon, dashboard and
+Home Assistant plumbing are installed either way; the choice only decides which
+adapters get set up. Pick them non-interactively with `-Clients`:
 
 ```powershell
-.\install.ps1 -Clients copilot,claude
+.\install.ps1 -Clients copilot,claude,mcp
 ```
 
 Your selection is remembered, so a re-run or a self-update reconfigures the same set.
-(MCP clients like Claude Desktop or ChatGPT are set up separately — see
-[`mcp/README.md`](mcp/README.md).)
+Choosing **mcp** installs the Node server, writes a paste-ready client config to
+`~/.copilot/mcp/mcp-client-config.json`, and registers Claude Desktop automatically if
+it's present; other MCP clients (Cursor, ChatGPT) use the snippet — see
+[`mcp/README.md`](mcp/README.md).
 
 It also registers in **Apps & features**, so it uninstalls like any other program. No
 installer executable, no admin rights, and no SmartScreen warning.
@@ -360,6 +365,11 @@ Codex or they are skipped silently.
 [`mcp/`](mcp/) holds a separate MCP server that brings the *ask* half of this to
 Claude Desktop and other MCP clients, on any OS. It races a Home Assistant card
 against the app's own elicitation prompt and cancels whichever loses.
+
+The installer's picker can set it up for you (`-Clients mcp`): it installs the server
+under `~/.copilot/mcp`, runs `npm install`, writes a paste-ready client config, and
+registers Claude Desktop automatically if present. Or run
+[`mcp/install-mcp.ps1`](mcp/install-mcp.ps1) directly.
 
 It speaks stdio by default, and can also serve over HTTP for clients that can't start
 a local process — ChatGPT among them. That listener binds to localhost and requires a

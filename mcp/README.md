@@ -45,6 +45,13 @@ reconcile and no OS-specific code.
 
 ## Setup
 
+**The easy way (Windows):** the bridge installer's client picker can do all of this —
+`.\install.ps1 -Clients mcp` (or tick *MCP server* in the prompt), or run
+[`install-mcp.ps1`](install-mcp.ps1) directly. It installs the server under
+`~/.copilot/mcp`, runs `npm install`, writes a paste-ready client config to
+`~/.copilot/mcp/mcp-client-config.json`, and registers Claude Desktop automatically if
+it's present. The rest of this document is the manual equivalent.
+
 ```bash
 cd mcp
 npm install

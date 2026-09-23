@@ -83,11 +83,12 @@ $bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
-$script:KnownClients = @('copilot', 'claude', 'codex')
+$script:KnownClients = @('copilot', 'claude', 'codex', 'mcp')
 $script:ClientLabels = [ordered]@{
     copilot = 'GitHub Copilot CLI'
     claude  = 'Claude Code'
     codex   = 'OpenAI Codex CLI'
+    mcp     = 'MCP server'
 }
 
 function ConvertTo-BridgeClientList {
@@ -122,6 +123,11 @@ function Test-BridgeClientInstalled {
             if (Get-Command codex -ErrorAction SilentlyContinue) { return $true }
             # Codex ships through npm and is not on PATH, so look where npm installs it.
             Test-Path -LiteralPath (Join-Path $env:APPDATA 'npm\node_modules\@openai\codex')
+        }
+        'mcp'     {
+            # There is no single "MCP client", but Claude Desktop is the one this can
+            # configure automatically, so its presence is the useful pre-select hint.
+            Test-Path -LiteralPath (Join-Path $env:APPDATA 'Claude')
         }
         default { $false }
     }
@@ -479,23 +485,23 @@ if (-not $SkipTask) {
 }
 
 # --------------------------------------------------------- configure adapters
-# Claude and Codex reuse the shared layer just installed, so configure them by running
-# their own installers. Each is idempotent and warns rather than fails if the client
-# turns out not to be present.
-foreach ($client in @('claude', 'codex')) {
+# Claude, Codex and the MCP server reuse the shared layer just installed, so configure
+# them by running their own installers. Each is idempotent and warns rather than fails
+# if the client turns out not to be present.
+foreach ($client in @('claude', 'codex', 'mcp')) {
     if ($selectedClients -notcontains $client) { continue }
     $adapterInstaller = Join-Path $repoRoot "$client\install-$client.ps1"
     if (-not (Test-Path -LiteralPath $adapterInstaller)) {
         Write-Warning "The $($script:ClientLabels[$client]) installer was not found at $adapterInstaller; skipping."
         continue
     }
-    Write-Step "Configuring the $($script:ClientLabels[$client]) adapter"
+    Write-Step "Configuring $($script:ClientLabels[$client])"
     try {
         if ($TargetHome) { & $adapterInstaller -TargetHome $TargetHome }
         else { & $adapterInstaller }
     }
     catch {
-        Write-Warning "The $($script:ClientLabels[$client]) adapter did not configure cleanly: $($_.Exception.Message)"
+        Write-Warning "$($script:ClientLabels[$client]) did not configure cleanly: $($_.Exception.Message)"
     }
 }
 
@@ -545,8 +551,15 @@ if ($selectedClients -contains 'codex') {
     Write-Host "  $stepNo. In Codex, trust the bridge hooks once when prompted, or they are skipped silently."
     $stepNo++
 }
+if ($selectedClients -contains 'mcp') {
+    Write-Host "  $stepNo. MCP: a paste-ready client config is at ~/.copilot/mcp/mcp-client-config.json"
+    Write-Host '        (Claude Desktop was configured automatically if present). See mcp/README.md for ChatGPT/HTTP.'
+    $stepNo++
+}
 Write-Host "  $stepNo. Open the Copilot Decisions dashboard in Home Assistant."
 Write-Host "     Logs: `$env:TEMP\copilot-bridge-daemon.log and copilot-decision-bridge.log"
-Write-Host ''
-Write-Host 'To use an MCP client (Claude Desktop, ChatGPT, ...), see mcp/README.md — it is a' -ForegroundColor DarkGray
-Write-Host 'separate Node server rather than a hook, so it is not part of this picker.' -ForegroundColor DarkGray
+if ($selectedClients -notcontains 'mcp') {
+    Write-Host ''
+    Write-Host 'Want an MCP client too (Claude Desktop, Cursor, ChatGPT)? Re-run with -Clients mcp,' -ForegroundColor DarkGray
+    Write-Host 'or add it in the picker. See mcp/README.md.' -ForegroundColor DarkGray
+}

@@ -140,6 +140,16 @@ if (Test-Path -LiteralPath $skillDir) {
     Remove-Item -LiteralPath $skillDir -Recurse -Force
 }
 
+$mcpDir = Join-Path $copilotHome 'mcp'
+if (Test-Path -LiteralPath $mcpDir) {
+    Write-Step 'Removing the MCP server'
+    Remove-Item -LiteralPath $mcpDir -Recurse -Force
+    # The Claude Desktop registration (and any other MCP client's) is left in place;
+    # remove it with `mcp/install-mcp.ps1 -Uninstall`, the same way the Claude and
+    # Codex client registrations are their own installers' job.
+    Write-Host '    (run mcp/install-mcp.ps1 -Uninstall to also remove it from Claude Desktop)'
+}
+
 if (-not $KeepConfig -and (Test-Path -LiteralPath $configPath)) {
     Write-Step 'Removing the bridge config (it holds your token)'
     Remove-Item -LiteralPath $configPath -Force
