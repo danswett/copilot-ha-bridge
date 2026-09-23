@@ -3,9 +3,11 @@
     Installs the Copilot <-> Home Assistant bridge.
 
 .DESCRIPTION
-    Copies the hook scripts into the Copilot CLI hooks folder, writes the bridge
-    config, merges the hook definitions into Copilot's hook config, and registers the
-    supervisor as a hidden scheduled task.
+    Copies the shared hook scripts into the bridge home, writes the config, and
+    registers the supervisor as a hidden scheduled task. It then configures the
+    clients you choose - Copilot CLI, Claude Code, Codex CLI - registering each one's
+    hooks; the shared daemon, dashboard and Home Assistant plumbing are installed
+    regardless.
 
     Everything is idempotent: re-running it upgrades an existing install in place.
 
@@ -25,6 +27,11 @@
     Install into this directory's .copilot instead of $HOME's. Intended for testing a
     build without touching a working install; $HOME is read-only in PowerShell, so it
     cannot be redirected any other way.
+
+.PARAMETER Clients
+    Which clients to configure: any of copilot, claude, codex (comma-separated).
+    Omit it to be asked interactively, or to reuse a previously chosen set on a
+    re-run. A non-interactive run with nothing set configures copilot.
 
 .PARAMETER SkipVerify
     Skip the Home Assistant connectivity check. Use for an offline install, or when
@@ -48,6 +55,7 @@ param(
     [string]$NotifyService,
     [string]$TickerCategory,
     [string]$TargetHome,
+    [string[]]$Clients,
     [switch]$SkipVerify,
     [switch]$NonInteractive,
     [switch]$SkipTask
@@ -74,6 +82,105 @@ $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBr
 $bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
+
+$script:KnownClients = @('copilot', 'claude', 'codex')
+$script:ClientLabels = [ordered]@{
+    copilot = 'GitHub Copilot CLI'
+    claude  = 'Claude Code'
+    codex   = 'OpenAI Codex CLI'
+}
+
+function ConvertTo-BridgeClientList {
+    <# Normalises and validates a list of client names, dropping blanks and dupes.
+       Each element may itself be comma-separated, so -Clients "copilot,claude" works
+       as well as -Clients copilot,claude. #>
+    param([string[]]$Clients)
+    $out = @()
+    foreach ($raw in @($Clients)) {
+        foreach ($c in (([string]$raw) -split ',')) {
+            $n = ([string]$c).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($n)) { continue }
+            if ($n -in @('github', 'copilot-cli', 'github-copilot')) { $n = 'copilot' }
+            if ($n -in @('claude-code')) { $n = 'claude' }
+            if ($n -in @('codex-cli', 'openai-codex')) { $n = 'codex' }
+            if ($script:KnownClients -notcontains $n) {
+                throw "Unknown client '$c'. Known clients: $($script:KnownClients -join ', ')."
+            }
+            if ($out -notcontains $n) { $out += $n }
+        }
+    }
+    $out
+}
+
+function Test-BridgeClientInstalled {
+    <# Best-effort detection so the picker can pre-select what is actually present. #>
+    param([Parameter(Mandatory)][string]$Client)
+    switch ($Client) {
+        'copilot' { [bool](Get-Command copilot -ErrorAction SilentlyContinue) }
+        'claude'  { [bool](Get-Command claude -ErrorAction SilentlyContinue) }
+        'codex'   {
+            if (Get-Command codex -ErrorAction SilentlyContinue) { return $true }
+            # Codex ships through npm and is not on PATH, so look where npm installs it.
+            Test-Path -LiteralPath (Join-Path $env:APPDATA 'npm\node_modules\@openai\codex')
+        }
+        default { $false }
+    }
+}
+
+function Resolve-BridgeClients {
+    <#
+        Decides which clients to configure. An explicit -Clients wins; then a
+        previously persisted selection, so a re-run or a self-update reconfigures the
+        same set; then an interactive pick; and finally 'copilot' as the
+        non-interactive default so an unattended install keeps working as before.
+    #>
+    param(
+        [string[]]$Requested,
+        [string[]]$Persisted,
+        [switch]$NonInteractive,
+        [scriptblock]$Prompt
+    )
+    if ($Requested)  { return @(ConvertTo-BridgeClientList $Requested) }
+    if ($Persisted)  { return @(ConvertTo-BridgeClientList $Persisted) }
+    if (-not $NonInteractive -and $Prompt) { return @(& $Prompt) }
+    return @('copilot')
+}
+
+function Read-BridgeClientSelection {
+    <# A small numbered multi-select; Enter accepts the detected default. #>
+    param([string[]]$Detected)
+
+    Write-Host ''
+    Write-Host 'Which clients should the bridge configure?' -ForegroundColor Yellow
+    Write-Host '(the shared daemon, dashboard and Home Assistant plumbing are always installed)' -ForegroundColor DarkGray
+
+    $index = @{}
+    $i = 1
+    foreach ($c in $script:ClientLabels.Keys) {
+        $mark = if ($Detected -contains $c) { ' (detected)' } else { '' }
+        Write-Host ("  {0}) {1}{2}" -f $i, $script:ClientLabels[$c], $mark)
+        $index["$i"] = $c
+        $i++
+    }
+    $default = if ($Detected) { @($Detected) } else { @('copilot') }
+    $defaultLabel = ($default | ForEach-Object { $script:ClientLabels[$_] }) -join ', '
+    Write-Host ("Enter numbers separated by commas, or press Enter for [{0}]." -f $defaultLabel)
+
+    $raw = Read-Host 'Clients'
+    if ([string]::IsNullOrWhiteSpace($raw)) { return @($default) }
+
+    $picked = @()
+    foreach ($tok in ($raw -split '[,\s]+')) {
+        $t = $tok.Trim()
+        if ([string]::IsNullOrWhiteSpace($t)) { continue }
+        if ($index.ContainsKey($t)) { $picked += $index[$t] }
+        else {
+            try { $picked += ConvertTo-BridgeClientList @($t) } catch { Write-Warning $_.Exception.Message }
+        }
+    }
+    if (-not $picked) { return @($default) }
+    @($picked | Select-Object -Unique)
+}
 
 function Test-IsHomeAssistant {
     <#
@@ -123,6 +230,10 @@ function Find-HomeAssistant {
     return $null
 }
 
+# Tests dot-source this script with BRIDGE_INSTALL_NORUN set to load its helper
+# functions without running the install; a real run never sets it.
+if ($env:BRIDGE_INSTALL_NORUN) { return }
+
 if (-not $IsWindows -and $PSVersionTable.PSVersion.Major -ge 6) {
     throw 'This bridge is Windows-only: reply injection uses AttachConsole/WriteConsoleInput.'
 }
@@ -130,7 +241,11 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
     throw "PowerShell 7+ is required (found $($PSVersionTable.PSVersion))."
 }
 if (-not (Test-Path -LiteralPath $copilotHome)) {
-    throw "Copilot CLI home not found at $copilotHome. Install and run the Copilot CLI first."
+    # ~/.copilot is the bridge's home for its shared scripts, config and daemon,
+    # whichever clients are configured - so create it rather than requiring the
+    # Copilot CLI to have run first. If Copilot itself is one of the chosen clients
+    # and is not actually installed, that is warned about later.
+    New-Item -ItemType Directory -Path $copilotHome -Force | Out-Null
 }
 
 # ---------------------------------------------------------------- hook scripts
@@ -142,10 +257,6 @@ Get-ChildItem (Join-Path $repoRoot 'hooks') -File | ForEach-Object {
 }
 
 if (Test-Path -LiteralPath $versionFile) { Copy-Item $versionFile $hooksDir -Force }
-# ---------------------------------------------------------------------- skill
-Write-Step "Installing the decision-notifier skill"
-if (-not (Test-Path -LiteralPath $skillDir)) { New-Item -ItemType Directory -Path $skillDir -Force | Out-Null }
-Copy-Item (Join-Path $repoRoot 'skill\SKILL.md') $skillDir -Force
 
 # --------------------------------------------------------------------- config
 Write-Step "Writing bridge config to $configPath"
@@ -208,6 +319,20 @@ if (-not $NonInteractive) {
         if ($entered) { $config.homeAssistant.token = $entered.Trim() }
     }
 }
+
+# ------------------------------------------------------------------- clients
+# Decide which clients to configure. -Clients wins, then a persisted selection (so a
+# re-run or self-update reconfigures the same set), then an interactive pick, then
+# 'copilot' as the unattended default. The shared daemon, dashboard and Home Assistant
+# plumbing are installed either way.
+$detectedClients = @($script:KnownClients | Where-Object { Test-BridgeClientInstalled $_ })
+$requestedClients = if ($PSBoundParameters.ContainsKey('Clients')) { $Clients } else { $null }
+$persistedClients = if ($config.PSObject.Properties['clients']) { @($config.clients) } else { @() }
+$selectedClients = Resolve-BridgeClients -Requested $requestedClients -Persisted $persistedClients `
+    -NonInteractive:$NonInteractive -Prompt { Read-BridgeClientSelection -Detected $detectedClients }
+if ($config.PSObject.Properties['clients']) { $config.clients = @($selectedClients) }
+else { $config | Add-Member -NotePropertyName 'clients' -NotePropertyValue @($selectedClients) -Force }
+Write-Step "Configuring: $(($selectedClients | ForEach-Object { $script:ClientLabels[$_] }) -join ', ')"
 
 # Record what was installed, so the update check can compare against the newest
 # release without guessing.
@@ -283,36 +408,46 @@ else {
     }
 }
 
-# ---------------------------------------------------------------- hook config
-Write-Step "Merging Copilot hook definitions"
-$hookDefs = [ordered]@{
-    agentStop = @(
-        [ordered]@{
-            type = 'command'
-            powershell = "& '$(Join-Path $hooksDir 'notify-agent-response.ps1')'"
-            timeoutSec = 30
-        }
-    )
-    preToolUse = @(
-        [ordered]@{
-            type = 'command'
-            matcher = 'ask_user'
-            powershell = "& '$(Join-Path $hooksDir 'route-ask-user-v3.ps1')'"
-            timeoutSec = 120
-        }
-    )
-    notification = @(
-        [ordered]@{
-            type = 'command'
-            matcher = 'permission_prompt'
-            powershell = "& '$(Join-Path $hooksDir 'notify-home-assistant.ps1')'"
-            timeoutSec = 15
-        }
-    )
+# ------------------------------------------------------- configure Copilot CLI
+if ($selectedClients -contains 'copilot') {
+    if (-not (Test-BridgeClientInstalled 'copilot')) {
+        Write-Warning 'Copilot CLI was selected but is not on PATH; its hooks are written and will take effect once it is installed.'
+    }
+
+    Write-Step 'Installing the decision-notifier skill'
+    if (-not (Test-Path -LiteralPath $skillDir)) { New-Item -ItemType Directory -Path $skillDir -Force | Out-Null }
+    Copy-Item (Join-Path $repoRoot 'skill\SKILL.md') $skillDir -Force
+
+    Write-Step 'Merging Copilot hook definitions'
+    $hookDefs = [ordered]@{
+        agentStop = @(
+            [ordered]@{
+                type = 'command'
+                powershell = "& '$(Join-Path $hooksDir 'notify-agent-response.ps1')'"
+                timeoutSec = 30
+            }
+        )
+        preToolUse = @(
+            [ordered]@{
+                type = 'command'
+                matcher = 'ask_user'
+                powershell = "& '$(Join-Path $hooksDir 'route-ask-user-v3.ps1')'"
+                timeoutSec = 120
+            }
+        )
+        notification = @(
+            [ordered]@{
+                type = 'command'
+                matcher = 'permission_prompt'
+                powershell = "& '$(Join-Path $hooksDir 'notify-home-assistant.ps1')'"
+                timeoutSec = 15
+            }
+        )
+    }
+    @{ version = 1; hooks = $hookDefs } | ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath $hookConfigPath -Encoding UTF8
+    Write-Host "    $hookConfigPath"
 }
-@{ version = 1; hooks = $hookDefs } | ConvertTo-Json -Depth 8 |
-    Set-Content -LiteralPath $hookConfigPath -Encoding UTF8
-Write-Host "    $hookConfigPath"
 
 # ------------------------------------------------------------- scheduled task
 if (-not $SkipTask) {
@@ -341,6 +476,27 @@ if (-not $SkipTask) {
     }
     Start-ScheduledTask -TaskName $taskName
     Write-Host "    registered and started"
+}
+
+# --------------------------------------------------------- configure adapters
+# Claude and Codex reuse the shared layer just installed, so configure them by running
+# their own installers. Each is idempotent and warns rather than fails if the client
+# turns out not to be present.
+foreach ($client in @('claude', 'codex')) {
+    if ($selectedClients -notcontains $client) { continue }
+    $adapterInstaller = Join-Path $repoRoot "$client\install-$client.ps1"
+    if (-not (Test-Path -LiteralPath $adapterInstaller)) {
+        Write-Warning "The $($script:ClientLabels[$client]) installer was not found at $adapterInstaller; skipping."
+        continue
+    }
+    Write-Step "Configuring the $($script:ClientLabels[$client]) adapter"
+    try {
+        if ($TargetHome) { & $adapterInstaller -TargetHome $TargetHome }
+        else { & $adapterInstaller }
+    }
+    catch {
+        Write-Warning "The $($script:ClientLabels[$client]) adapter did not configure cleanly: $($_.Exception.Message)"
+    }
 }
 
 # ------------------------------------------------------- add/remove programs
@@ -376,6 +532,21 @@ Write-Host "    'Copilot CLI Home Assistant bridge' is now uninstallable from Se
 
 Write-Step 'Done'
 Write-Host 'Next steps:' -ForegroundColor Yellow
-Write-Host '  1. Restart any running Copilot CLI sessions (/restart) so they pick up the hooks.'
-Write-Host '  2. Open the Copilot Decisions dashboard in Home Assistant.'
+$stepNo = 1
+if ($selectedClients -contains 'copilot') {
+    Write-Host "  $stepNo. Restart any running Copilot CLI sessions (/restart) so they pick up the hooks."
+    $stepNo++
+}
+if ($selectedClients -contains 'claude') {
+    Write-Host "  $stepNo. Restart any running Claude Code sessions so they pick up the hooks."
+    $stepNo++
+}
+if ($selectedClients -contains 'codex') {
+    Write-Host "  $stepNo. In Codex, trust the bridge hooks once when prompted, or they are skipped silently."
+    $stepNo++
+}
+Write-Host "  $stepNo. Open the Copilot Decisions dashboard in Home Assistant."
 Write-Host "     Logs: `$env:TEMP\copilot-bridge-daemon.log and copilot-decision-bridge.log"
+Write-Host ''
+Write-Host 'To use an MCP client (Claude Desktop, ChatGPT, ...), see mcp/README.md — it is a' -ForegroundColor DarkGray
+Write-Host 'separate Node server rather than a hook, so it is not part of this picker.' -ForegroundColor DarkGray

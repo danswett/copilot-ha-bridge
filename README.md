@@ -43,7 +43,9 @@ when idle.
 | **Any MCP client** — Claude Desktop, ChatGPT, … | The *ask* half only, on any OS: a Home Assistant card races the app's own prompt and cancels whichever loses. See [`mcp/`](mcp/). |
 
 The Windows daemon, dashboard, and Home Assistant plumbing are shared; each client is
-just a thin adapter onto them.
+just a thin adapter onto them. The installer sets up the shared layer, then asks which
+of Copilot CLI, Claude Code and Codex CLI to configure (detecting which you have). MCP
+is set up separately — it's a Node server, not a hook.
 
 ---
 
@@ -80,9 +82,10 @@ only a Home Assistant token.
 ## Requirements
 
 * Windows 10/11 and **PowerShell 7+**
-* At least one supported client. **[GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli)**
-  is set up by the base install; **Claude Code**, **Codex CLI**, and **MCP clients** are
-  added by their own installers ([`claude/`](claude/), [`codex/`](codex/), [`mcp/`](mcp/))
+* At least one supported client. The installer asks which of
+  **[GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli)**,
+  **Claude Code** and **Codex CLI** to configure (detecting which you have); **MCP
+  clients** are set up separately ([`mcp/`](mcp/))
 * Home Assistant with the **MQTT integration** configured (any broker)
 * A Home Assistant **long-lived access token**
 * These HACS frontend cards:
@@ -113,6 +116,19 @@ With no arguments the installer finds Home Assistant for you: it probes
 Windows resolves natively) and confirms the product from its unauthenticated
 `manifest.json`. You confirm or correct the URL, then it walks you through creating a
 long-lived token and pastes straight into the config.
+
+It then asks **which clients to configure** — Copilot CLI, Claude Code, Codex CLI —
+pre-selecting the ones it detects. The shared daemon, dashboard and Home Assistant
+plumbing are installed either way; the choice only decides which adapters' hooks get
+registered. Pick them non-interactively with `-Clients`:
+
+```powershell
+.\install.ps1 -Clients copilot,claude
+```
+
+Your selection is remembered, so a re-run or a self-update reconfigures the same set.
+(MCP clients like Claude Desktop or ChatGPT are set up separately — see
+[`mcp/README.md`](mcp/README.md).)
 
 It also registers in **Apps & features**, so it uninstalls like any other program. No
 installer executable, no admin rights, and no SmartScreen warning.
@@ -250,6 +266,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-update.ps1           # version comparison, release cache, failure safety
 .\tests\test-update-outcome.ps1   # install spinner + updated/failed notification
 .\tests\test-restart-restore.ps1  # a daemon restart restores cards instead of blanking them
+.\tests\test-install-clients.ps1  # installer client selection (‑Clients, persisted, defaults)
 .\tests\test-verbose-toggle.ps1   # Live Verbose helper is provisioned without ever resetting it
 ```
 

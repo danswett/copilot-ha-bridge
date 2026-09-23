@@ -15,6 +15,7 @@
   "copilot": {
     "sessionStateRoot": ""
   },
+  "clients": ["copilot"],
   "updates": {
     "repository": "danswett/copilot-ha-bridge",
     "installedVersion": "",
