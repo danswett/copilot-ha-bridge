@@ -85,6 +85,27 @@ foreach ($c in @('copilot', 'claude', 'codex', 'mcp')) {
     Test-That "$c detection does not throw" { (Test-BridgeClientInstalled $c) -is [bool] }
 }
 
+Write-Host '--- Protect-BridgeSecretFile locks a token file to the current user ---'
+$secretFile = Join-Path $env:TEMP ("bridge-acl-" + [guid]::NewGuid().ToString('N') + '.json')
+Set-Content -LiteralPath $secretFile -Value '{"homeAssistant":{"token":"secret"}}' -Encoding UTF8
+try {
+    $hardened = Protect-BridgeSecretFile -Path $secretFile
+    Test-That 'hardening reports success' { $hardened }
+    $acl = Get-Acl -LiteralPath $secretFile
+    Test-That 'inheritance is disabled' { $acl.AreAccessRulesProtected }
+    $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    Test-That 'only the current user is granted access' {
+        (@($acl.Access).Count -eq 1) -and
+        ($acl.Access[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -eq $me)
+    }
+    Test-That 'a missing file is handled without throwing' {
+        (Protect-BridgeSecretFile -Path (Join-Path $env:TEMP ([guid]::NewGuid().ToString('N')))) -eq $false
+    }
+}
+finally {
+    Remove-Item -LiteralPath $secretFile -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) check(s) failed" -ForegroundColor Red

@@ -236,6 +236,40 @@ function Find-HomeAssistant {
     return $null
 }
 
+function Protect-BridgeSecretFile {
+    <#
+        Restricts a file that holds the Home Assistant token to the current user, so
+        another local account cannot read the token off disk. Best-effort by design: a
+        machine with unusual ACL policy must not fail the whole install over this.
+
+        Returns $true when the file ended up with inheritance disabled and no identity
+        other than the current user granted access, so the behaviour is testable.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    try {
+        if (-not (Test-Path -LiteralPath $Path)) { return $false }
+        $me = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = Get-Acl -LiteralPath $Path
+        # Disable inheritance and drop inherited rules, then strip every explicit rule
+        # so only the single current-user grant below remains.
+        $acl.SetAccessRuleProtection($true, $false)
+        @($acl.Access) | ForEach-Object { [void]$acl.RemoveAccessRule($_) }
+        $acl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule(
+            $me, 'FullControl', 'Allow')))
+        Set-Acl -LiteralPath $Path -AclObject $acl
+
+        $check = (Get-Acl -LiteralPath $Path).Access
+        return -not ($check | Where-Object {
+            $_.IsInherited -or $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]) -ne $me
+        })
+    }
+    catch {
+        Write-Host "    note: could not restrict permissions on $(Split-Path $Path -Leaf) ($($_.Exception.Message))" -ForegroundColor Yellow
+        return $false
+    }
+}
+
 # Tests dot-source this script with BRIDGE_INSTALL_NORUN set to load its helper
 # functions without running the install; a real run never sets it.
 if ($env:BRIDGE_INSTALL_NORUN) { return }
@@ -269,6 +303,7 @@ Write-Step "Writing bridge config to $configPath"
 $config = if (Test-Path -LiteralPath $configPath) {
     # Never lose a working config to a mistyped re-run.
     Copy-Item $configPath "$configPath.bak" -Force
+    [void](Protect-BridgeSecretFile -Path "$configPath.bak")
     Write-Host "    backed up existing config to $(Split-Path $configPath -Leaf).bak"
     Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
@@ -350,7 +385,9 @@ if (-not $config.PSObject.Properties.Name.Contains('updates')) {
 $config.updates.installedVersion = $version
 
 $config | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $configPath -Encoding UTF8
-# The token lives here; keep it out of any shared listing.
+# The token lives here; keep it readable only by the current user and out of any
+# shared listing.
+[void](Protect-BridgeSecretFile -Path $configPath)
 Write-Host "    baseUrl      : $($config.homeAssistant.baseUrl)"
 Write-Host "    token        : $(if ($config.homeAssistant.token) { 'set in config' } else { "from `$env:$($config.homeAssistant.tokenEnvVar)" })"
 Write-Host "    notifications: $(if ($config.notifications.enabled) { $config.notifications.service } else { 'disabled' })"
