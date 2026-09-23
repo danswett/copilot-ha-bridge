@@ -296,7 +296,8 @@ function Set-CopilotMqttGlobalEntityId {
 
 function Initialize-CopilotVerboseToggle {
     <#
-        Ensures input_boolean.copilot_cli_live_verbose exists.
+        Ensures input_boolean.copilot_cli_live_verbose exists, without ever resetting
+        its value.
 
         The dashboard's Live Verbose control targets this helper, but nothing else
         creates it, so a fresh install would render an "Entity not found" row. There
@@ -304,10 +305,22 @@ function Initialize-CopilotVerboseToggle {
         not a Home Assistant integration — so it self-provisions here instead, using
         the input_boolean collection API over the WebSocket.
 
+        Home Assistant restores a storage-backed input_boolean across a restart: a
+        toggle left On reads On again once the core comes back (verified against a
+        real core restart). The bridge's only job is therefore to make sure the helper
+        exists — it must never recreate one that already exists, because a
+        delete+create resets the state to Off and silently discards the user's choice.
+
+        That is the bug this function used to cause. When the daemon (re)starts while
+        Home Assistant is still booting, the helper is already in storage (so
+        input_boolean/list returns it) but its state has not materialised yet. The old
+        code read that transient no-state as "broken" and recreated the helper — which
+        is exactly what flipped Live Verbose off after a restart. It never deletes a
+        stored helper now; the state reappears on its own once Home Assistant finishes
+        starting.
+
         Home Assistant slugifies the helper name into the id, so the name below must
-        stay in sync with $DaemonConfig.VerboseToggle. Creating a storage-backed
-        helper (rather than POSTing a bare state) is what makes the toggle survive a
-        Home Assistant restart.
+        stay in sync with $DaemonConfig.VerboseToggle.
 
         Returns $true when the helper exists afterwards.
     #>
@@ -340,30 +353,38 @@ function Initialize-CopilotVerboseToggle {
     try {
         $existing = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'input_boolean/list' }))[0]
         if (@($existing) | Where-Object { [string]$_.id -eq $HelperId }) {
-            # Present in storage is not proof of a working entity: if the entity_id was
-            # previously occupied by a bare state object, the helper can register
-            # without ever materialising a state. Recreate it when that happens.
-            if (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId") {
-                & $applyDisplayName
-                return $true
+            # The helper is in storage. Never delete it: its value - including one Home
+            # Assistant restored across a restart - must be preserved. A missing state
+            # here means Home Assistant is still starting, not that the helper is
+            # broken; it will materialise on its own, so leave it untouched.
+            if (-not (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId")) {
+                Write-Warning "Verbose toggle is in storage but has no state yet; leaving it in place (it appears once Home Assistant finishes starting)."
             }
-            [void](Invoke-CopilotHaWebSocket -Commands @(@{
-                type = 'input_boolean/delete'; input_boolean_id = $HelperId
-            }))
-            Start-Sleep -Seconds 2
+            & $applyDisplayName
+            return $true
         }
 
+        # Genuinely absent from storage, so create it. A brand-new install starts Off,
+        # which is the right default.
         $created = (Invoke-CopilotHaWebSocket -Commands @(@{
             type = 'input_boolean/create'
             name = $Name
             icon = $Icon
         }))[0]
 
-        # Guard the name->id assumption rather than trusting the slug: a mismatch
-        # would leave the dashboard pointing at an entity that does not exist.
+        # A slug mismatch almost always means the helper already existed and Home
+        # Assistant de-duplicated the id - typically because the list above came back
+        # transiently empty during boot. Remove the stray rather than leaving litter,
+        # and trust the original helper (whose value is intact).
         if ([string]$created.id -ne $HelperId) {
-            Write-Warning "Created verbose toggle as '$($created.id)', expected '$HelperId'."
-            return $false
+            Write-Warning "Created verbose toggle as '$($created.id)', expected '$HelperId'; removing the stray and keeping the existing helper."
+            try {
+                [void](Invoke-CopilotHaWebSocket -Commands @(@{
+                    type = 'input_boolean/delete'; input_boolean_id = [string]$created.id
+                }))
+            }
+            catch { }
+            return $true
         }
         if (-not (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId")) { return $false }
 

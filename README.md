@@ -238,7 +238,7 @@ The Claude adapter and the MCP server have their own suites — see their README
 |---|---|
 | Cards show `unknown` after a Home Assistant restart | Self-heals within one reconcile (~15 s); the entities are optimistic and have no state to restore. |
 | "Entity not found" on a card | The daemon provisions entities on its next pass; check the daemon log. |
-| Live Verbose row is unavailable | The daemon creates `input_boolean.copilot_cli_live_verbose` at startup and repairs it if it loses its state. Restart the daemon and check the log for `verbose toggle ready`. |
+| Live Verbose row is unavailable | Home Assistant is still starting: the toggle appears on its own once it finishes. The daemon ensures the helper exists at startup but never recreates it, so its on/off value is preserved across restarts. Restart the daemon and check the log for `verbose toggle ready`. |
 | Answers picked in Home Assistant do nothing | The session predates the install — `/restart` it. |
 | Nothing at all happens | Check `$env:TEMP\copilot-bridge-daemon.log` and `copilot-decision-bridge.log`. |
 
