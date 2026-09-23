@@ -1,5 +1,8 @@
 # AI coding agent ⇄ Home Assistant bridge
 
+[![CI](https://github.com/danswett/copilot-ha-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/danswett/copilot-ha-bridge/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/danswett/copilot-ha-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/danswett/copilot-ha-bridge/actions/workflows/codeql.yml)
+
 Answer your AI coding agent from Home Assistant — or from your terminal — whichever you
 happen to be looking at. Works with **GitHub Copilot CLI**, **Claude Code**, **OpenAI
 Codex CLI**, and any **MCP client**.
