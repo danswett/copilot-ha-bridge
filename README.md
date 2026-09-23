@@ -266,6 +266,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 ```powershell
 .\tests\test-decision-args.ps1    # ask_user argument parsing and recovery
 .\tests\test-decision-retry.ps1   # HTTP retry / transient-failure classification
+.\tests\test-bridge-adapter.ps1   # shared adapter orchestration (entities, status, notifications)
 .\tests\test-security.ps1         # template injection, path and topic safety, token handling
 .\tests\test-reliability.ps1      # request budget, StrictMode safety, stale-state pruning
 .\tests\test-update.ps1           # version comparison, release cache, failure safety

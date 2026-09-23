@@ -28,6 +28,7 @@ try {
     $core = Join-Path $HOME '.copilot\hooks'
     . (Join-Path $core 'decision-bridge-common.ps1')
     . (Join-Path $core 'decision-mqtt.ps1')
+    . (Join-Path $core 'bridge-adapter.ps1')
 
     $event = Get-ClaudeHookEvent
     if ($null -eq $event) { Exit-Silently }
@@ -43,27 +44,17 @@ try {
     Write-ClaudeSessionRegistration -SessionId $sessionId -TranscriptPath $transcriptPath `
         -WorkingDirectory ([string]$event.cwd) -ProcessId (Get-ClaudeOwningProcessId) | Out-Null
 
-    # Probe before committing to any Home Assistant work: the turn has already ended.
-    # A host that is gone is detected in about a second; one that answers gets a
-    # budget generous enough for discovery, the registry rename and arming.
-    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
-        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
-        Exit-Silently
-    }
-    Set-DecisionBridgeDeadline -Seconds 45
-    $headers = Get-HomeAssistantHeaders
+    # The turn has already ended, so a miss here costs nothing - the daemon reconciles
+    # it. Enter-BridgeAdapterSession returns headers when reachable, or $null when not.
+    $headers = Enter-BridgeAdapterSession
+    if (-not $headers) { Exit-Silently }
     $display = Get-ClaudeSessionDisplay -SessionId $sessionId -WorkingDirectory ([string]$event.cwd)
 
     # Only touch entities that already exist. A turn can end in a session that never
     # asked anything, and publishing a card for it here would create clutter the
     # daemon is responsible for.
     $node = Get-CopilotMqttNodeId -SessionId $sessionId
-    $exists = $false
-    try {
-        $probe = Get-HomeAssistantState -EntityId "sensor.${node}_status" -Headers $headers
-        $exists = ($null -ne $probe -and [string]$probe.state -notin @('unavailable', ''))
-    }
-    catch { $exists = $false }
+    $exists = Test-BridgeSessionEntityPresent -EntityId "sensor.${node}_status" -Headers $headers
 
     $response = $null
     # Claude hands the finished reply to the Stop hook directly as
@@ -81,27 +72,11 @@ try {
     }
 
     if ($exists) {
-        Set-CopilotMqttStatus -SessionId $sessionId -Status 'idle' -Headers $headers -Attributes @{
-            session = $display.Name
-            machine = $display.Machine
-            updated = [DateTimeOffset]::Now.ToString('o')
-        }
-        if (-not [string]::IsNullOrWhiteSpace($response)) {
-            Set-CopilotMqttActivity -SessionId $sessionId -Summary $response `
-                -Detail @{ session = $display.Name; machine = $display.Machine } -Headers $headers
-        }
+        Publish-BridgeSessionStatus -SessionId $sessionId -SessionName $display.Name `
+            -Machine $display.Machine -Headers $headers -Status 'idle' -Activity ([string]$response)
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($response)) {
-        $preview = $response
-        if ($preview.Length -gt 880) {
-            $preview = $preview.Substring(0, 880).TrimEnd() +
-                "...`n`nFull response is on the dashboard."
-        }
-        $title = "Response: $($display.Name)"
-        if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
-        Send-BridgeNotification -Title $title -Message $preview -Headers $headers
-    }
+    Send-BridgeResponseNotification -SessionName $display.Name -Response ([string]$response) -Headers $headers
 
     Write-DecisionBridgeLog -Message (
         "claude Stop: session=$($sessionId.Substring(0,[Math]::Min(8,$sessionId.Length))) " +

@@ -33,6 +33,7 @@ try {
     . (Join-Path $core 'decision-bridge-common.ps1')
     . (Join-Path $core 'decision-mqtt.ps1')
     . (Join-Path $core 'decision-ha-websocket.ps1')
+    . (Join-Path $core 'bridge-adapter.ps1')
 
     $event = Get-CodexHookEvent
     if ($null -eq $event) { Exit-Silently }
@@ -114,59 +115,24 @@ try {
         "codex ${eventName}: session=$($sessionId.Substring(0,[Math]::Min(8,$sessionId.Length))) status=$status"
     )
 
-    # Probe before committing to network work: a host that is gone is detected in
-    # about a second, and the daemon reconciles whatever this misses.
-    if ($eventName -eq 'SessionEnd') {
-        # Nothing below applies to SessionEnd, and its three second budget is better
-        # spent returning promptly than probing.
-        Exit-Silently
-    }
-    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
-        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
-        Exit-Silently
-    }
-    Set-DecisionBridgeDeadline -Seconds 45
+    # A hook must never wait on the network; the daemon reconciles whatever a miss
+    # leaves behind. SessionEnd is special: Codex clamps it to three seconds, not
+    # enough to retire a session's entities without leaving a card behind, so the
+    # registration above is already marked ended and the daemon retires it on the next
+    # reconcile.
+    if ($eventName -eq 'SessionEnd') { Exit-Silently }
 
-    $headers = Get-HomeAssistantHeaders
+    $headers = Enter-BridgeAdapterSession
+    if (-not $headers) { Exit-Silently }
     $display = Get-CodexSessionDisplay -SessionId $sessionId -WorkingDirectory $workingDirectory
     $node = Get-CopilotMqttNodeId -SessionId $sessionId
 
-    if ($eventName -eq 'SessionEnd') {
-        # Deliberately no Home Assistant work here. Codex clamps SessionEnd hooks to
-        # three seconds, which is not enough to retire a session's entities - several
-        # publishes plus a dashboard rebuild - and a cleanup cut off halfway leaves a
-        # card behind, which is exactly what happened before this was moved.
-        #
-        # The registration above is already marked ended, and the daemon retires the
-        # entities on its next reconcile, where there is time to do it properly.
-        Exit-Silently
-    }
+    [void](Confirm-BridgeSessionEntities -SessionId $sessionId -SessionName $display.Name `
+        -Machine $display.Machine -Headers $headers)
 
-    $exists = $false
-    try {
-        $probe = Get-HomeAssistantState -EntityId "sensor.${node}_status" -Headers $headers
-        $exists = ($null -ne $probe -and [string]$probe.state -notin @('unavailable', ''))
-    }
-    catch { $exists = $false }
-
-    if (-not $exists) {
-        Publish-CopilotMqttSession -SessionId $sessionId -SessionName $display.Name `
-            -Machine $display.Machine -Headers $headers | Out-Null
-        Start-Sleep -Milliseconds 1500
-        [void](Set-CopilotMqttEntityIds -SessionId $sessionId)
-    }
-
-    Set-CopilotMqttStatus -SessionId $sessionId -Status $status -Headers $headers -Attributes @{
-        session    = $display.Name
-        machine    = $display.Machine
-        model      = (Get-EventField 'model')
-        process_id = (Get-CodexOwningProcessId)
-        updated    = [DateTimeOffset]::Now.ToString('o')
-    }
-    if ($activity) {
-        Set-CopilotMqttActivity -SessionId $sessionId -Summary $activity `
-            -Detail @{ session = $display.Name; machine = $display.Machine } -Headers $headers
-    }
+    Publish-BridgeSessionStatus -SessionId $sessionId -SessionName $display.Name `
+        -Machine $display.Machine -Headers $headers -Status $status -Activity $activity `
+        -ExtraAttributes @{ model = (Get-EventField 'model'); process_id = (Get-CodexOwningProcessId) }
 
     if ($pendingApproval) {
         # Arm the selector so the command can be approved from the dashboard. The
@@ -180,9 +146,8 @@ try {
             -Fields @() -DecisionId $decisionId -Headers $headers | Out-Null
         Write-CodexApprovalMarker -SessionId $sessionId -DecisionId $decisionId -Question $question
 
-        $title = "Approval needed: $($display.Name)"
-        if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
-        Send-BridgeNotification -Title $title -Message $question -Headers $headers
+        Send-BridgeNotification -Title (Format-BridgeNotificationTitle "Approval needed: $($display.Name)") `
+            -Message $question -Headers $headers
     }
     elseif ($eventName -in @('PreToolUse', 'Stop')) {
         # Whatever was awaiting approval has been answered - in the terminal or on the
@@ -196,14 +161,8 @@ try {
         }
     }
 
-    if ($eventName -eq 'Stop' -and $response) {
-        $preview = $response
-        if ($preview.Length -gt 880) {
-            $preview = $preview.Substring(0, 880).TrimEnd() + "...`n`nFull response is on the dashboard."
-        }
-        $title = "Response: $($display.Name)"
-        if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
-        Send-BridgeNotification -Title $title -Message $preview -Headers $headers
+    if ($eventName -eq 'Stop') {
+        Send-BridgeResponseNotification -SessionName $display.Name -Response $response -Headers $headers
     }
 
     Exit-Silently

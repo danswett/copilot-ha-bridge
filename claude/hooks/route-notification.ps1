@@ -33,6 +33,7 @@ try {
     . (Join-Path $core 'decision-bridge-common.ps1')
     . (Join-Path $core 'decision-mqtt.ps1')
     . (Join-Path $core 'decision-ha-websocket.ps1')
+    . (Join-Path $core 'bridge-adapter.ps1')
 
     $event = Get-ClaudeHookEvent
     if ($null -eq $event) { Exit-Silently }
@@ -49,42 +50,19 @@ try {
         -TranscriptPath (Resolve-ClaudeTranscriptPath -SessionId $sessionId -KnownPath ([string]$event.transcript_path)) `
         -WorkingDirectory ([string]$event.cwd) -ProcessId $owningPid | Out-Null
 
-    # Probe before committing to any Home Assistant work: a notification must never delay Claude.
-    # A host that is gone is detected in about a second; one that answers gets a
-    # budget generous enough for discovery, the registry rename and arming.
-    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
-        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
-        Exit-Silently
-    }
-    Set-DecisionBridgeDeadline -Seconds 45
-    $headers = Get-HomeAssistantHeaders
+    # A notification must never delay Claude; the daemon reconciles whatever a miss
+    # leaves behind. A notification can be the first thing a session ever does, so the
+    # entities are published on demand rather than waiting for the daemon's reconcile.
+    $headers = Enter-BridgeAdapterSession
+    if (-not $headers) { Exit-Silently }
     $display = Get-ClaudeSessionDisplay -SessionId $sessionId -WorkingDirectory ([string]$event.cwd)
-    $node = Get-CopilotMqttNodeId -SessionId $sessionId
 
-    # Publish on demand: a notification can be the first thing a session ever does, so
-    # waiting for the daemon's reconcile would delay exactly the alert that matters.
-    $exists = $false
-    try {
-        $probe = Get-HomeAssistantState -EntityId "sensor.${node}_status" -Headers $headers
-        $exists = ($null -ne $probe -and [string]$probe.state -notin @('unavailable', ''))
-    }
-    catch { $exists = $false }
+    [void](Confirm-BridgeSessionEntities -SessionId $sessionId -SessionName $display.Name `
+        -Machine $display.Machine -Headers $headers)
 
-    if (-not $exists) {
-        Publish-CopilotMqttSession -SessionId $sessionId -SessionName $display.Name `
-            -Machine $display.Machine -Headers $headers | Out-Null
-        Start-Sleep -Milliseconds 1500
-        [void](Set-CopilotMqttEntityIds -SessionId $sessionId)
-    }
-
-    Set-CopilotMqttStatus -SessionId $sessionId -Status 'waiting' -Headers $headers -Attributes @{
-        session = $display.Name
-        machine = $display.Machine
-        message = $message
-        updated = [DateTimeOffset]::Now.ToString('o')
-    }
-    Set-CopilotMqttActivity -SessionId $sessionId -Summary $message `
-        -Detail @{ session = $display.Name; machine = $display.Machine } -Headers $headers
+    Publish-BridgeSessionStatus -SessionId $sessionId -SessionName $display.Name `
+        -Machine $display.Machine -Headers $headers -Status 'waiting' -Activity $message `
+        -ExtraAttributes @{ message = $message }
 
     $body = @(
         "Session: $($display.Name)"
@@ -94,8 +72,7 @@ try {
         ''
         'Answer in the terminal, or try the Reply box on the dashboard.'
     ) -join "`n"
-    $title = "Waiting: $($display.Name)"
-    if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
+    $title = Format-BridgeNotificationTitle "Waiting: $($display.Name)"
     Send-BridgeNotification -Title $title -Message $body -Headers $headers
 
     Write-DecisionBridgeLog -Message (
