@@ -473,6 +473,45 @@ function Set-CopilotMqttUpdateEntityIds {
     $changed
 }
 
+function Set-CopilotMqttNewSessionEntityIds {
+    <#
+        Forces the new-session controls onto deterministic ids.
+
+        Same reason as the update entities: Home Assistant builds an MQTT entity id
+        from device name plus entity name and ignores object_id, so these would
+        otherwise appear as text.copilot_cli_bridge_new_session_prompt and friends.
+        The daemon reads all four by id on every reconcile, and the generated
+        dashboard references them literally, so they have to be predictable.
+    #>
+    $wanted = @{
+        'copilot_cli_new_prompt'         = 'text.copilot_cli_new_prompt'
+        'copilot_cli_new_workspace'      = 'select.copilot_cli_new_workspace'
+        'copilot_cli_new_profile'        = 'select.copilot_cli_new_profile'
+        'copilot_cli_new_session'        = 'button.copilot_cli_new_session'
+        'copilot_cli_new_session_result' = 'sensor.copilot_cli_new_session_result'
+    }
+
+    $registry = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
+    $byUniqueId = @{}
+    foreach ($entry in @($registry)) {
+        if ($entry.unique_id) { $byUniqueId[[string]$entry.unique_id] = $entry }
+    }
+
+    $changed = $false
+    foreach ($uniqueId in $wanted.Keys) {
+        $entry = $byUniqueId[$uniqueId]
+        if ($null -eq $entry) { continue }
+        if ([string]$entry.entity_id -eq $wanted[$uniqueId]) { continue }
+        [void](Invoke-CopilotHaWebSocket -Commands @(@{
+            type          = 'config/entity_registry/update'
+            entity_id     = [string]$entry.entity_id
+            new_entity_id = $wanted[$uniqueId]
+        }))
+        $changed = $true
+    }
+    $changed
+}
+
 function Save-CopilotSessionDashboard {
     <#
         Regenerates the copilot-decisions dashboard for the per-session MQTT model.
@@ -492,7 +531,10 @@ function Save-CopilotSessionDashboard {
         [AllowEmptyCollection()]
         [object[]]$Sessions,
 
-        [string]$VerboseToggle = 'input_boolean.copilot_cli_live_verbose'
+        [string]$VerboseToggle = 'input_boolean.copilot_cli_live_verbose',
+
+        # Whether to show the Agency profile row on the new-session card.
+        [switch]$IncludeProfile
     )
 
     $decisionEntities = @($Sessions | ForEach-Object { "select.$($_.Node)_decision" })
@@ -539,8 +581,32 @@ function Save-CopilotSessionDashboard {
         }
     }
 
+    $newSessionRows = @(
+        @{ entity = 'select.copilot_cli_new_workspace'; name = 'Workspace' }
+    )
+    # The profile row is only meaningful when Agency is the launcher, so it is left
+    # out entirely rather than shown as a control that does nothing.
+    if ($IncludeProfile) {
+        $newSessionRows += @{ entity = 'select.copilot_cli_new_profile'; name = 'Profile' }
+    }
+    $newSessionRows += @(
+        @{ entity = 'text.copilot_cli_new_prompt'; name = 'Opening prompt' }
+        @{ entity = 'button.copilot_cli_new_session'; name = 'Launch' }
+        @{ entity = 'sensor.copilot_cli_new_session_result'; name = 'Last launch' }
+    )
+
+    # Starting a new session. Placed with the controls rather than among the session
+    # cards because it belongs to the bridge, not to any one session, and it stays
+    # visible when nothing is running at all - which is exactly when it is needed.
+    $newSessionCard = @{
+        type = 'entities'
+        title = 'Start a new session'
+        show_header_toggle = $false
+        entities = $newSessionRows
+    }
+
     # The control panel is a plain card pair at the top of the masonry flow.
-    $controlCards = @($controlMarkdown, $toggleCard, $updateCard)
+    $controlCards = @($controlMarkdown, $toggleCard, $updateCard, $newSessionCard)
 
     $sessionSections = foreach ($session in $Sessions) {
         $node = $session.Node

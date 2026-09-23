@@ -422,6 +422,149 @@ function Publish-CopilotMqttUpdate {
         -Payload ($button | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 }
 
+function Publish-CopilotMqttNewSession {
+    <#
+        Publishes the controls that start a brand new CLI session, on the same
+        bridge-level device as the update entity and the session counter.
+
+        Four entities, deliberately split rather than combined:
+
+          * a `text` box for the opening prompt,
+          * a `select` listing the approved working directories,
+          * a `button` that actually launches,
+          * a `sensor` reporting what the last press did.
+
+        The text and select are optimistic - no state topic - for the same reason
+        the per-session reply box is: nothing here subscribes to the broker, so a
+        typed value would never be echoed back and would never stick.
+
+        Launching is a separate button rather than an action on the text box because
+        Home Assistant commits a text entity as soon as it loses focus. Acting on
+        the value alone would spawn a session the moment you clicked away, which is
+        easy to do by accident and impossible to undo. The button's state is the
+        timestamp of its last press, which is exactly the signal the daemon needs.
+    #>
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Workspaces,
+
+        [AllowEmptyCollection()]
+        [string[]]$Profiles = @(),
+
+        [string]$LastResult = '',
+
+        [Parameter(Mandatory)]
+        [hashtable]$Headers
+    )
+
+    $device = @{
+        identifiers  = @('copilot_cli_bridge')
+        name         = 'AI Agent Bridge'
+        manufacturer = 'AI CLI bridge'
+    }
+    $prefix = $script:CopilotMqttConfig.DiscoveryPrefix
+    $root = $script:CopilotMqttConfig.TopicRoot
+
+    # An MQTT select must offer at least one option, so a bridge with nothing
+    # configured still publishes a single explanatory entry rather than an invalid
+    # discovery payload that Home Assistant would reject outright.
+    $options = @(@($Workspaces) | ForEach-Object { [string]$_.Label } | Where-Object { $_ })
+    if ($options.Count -eq 0) { $options = @('(no workspaces configured)') }
+
+    $promptConfig = @{
+        name          = 'New session prompt'
+        unique_id     = 'copilot_cli_new_prompt'
+        object_id     = 'copilot_cli_new_prompt'
+        command_topic = "$root/newsession/prompt/set"
+        max           = $script:CopilotMqttConfig.ReplyMaxChars
+        mode          = 'text'
+        icon          = 'mdi:message-plus-outline'
+        device        = $device
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/text/copilot_cli_bridge/new_prompt/config" `
+        -Payload ($promptConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    $workspaceConfig = @{
+        name          = 'New session workspace'
+        unique_id     = 'copilot_cli_new_workspace'
+        object_id     = 'copilot_cli_new_workspace'
+        command_topic = "$root/newsession/workspace/set"
+        options       = $options
+        icon          = 'mdi:folder-open-outline'
+        device        = $device
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_workspace/config" `
+        -Payload ($workspaceConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    # The Agency profile decides which MCP servers and plugins a session gets, and it
+    # is an axis of its own rather than a property of the directory - the same folder
+    # is routinely opened under different profiles. It therefore gets its own
+    # selector instead of being folded into the workspace list.
+    #
+    # Published even when Agency is not the launcher, so the entity the generated
+    # dashboard references always exists; the daemon simply ignores its value.
+    $profileOptions = @(@($Profiles) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($profileOptions.Count -eq 0) { $profileOptions = @('(default)') }
+
+    $profileConfig = @{
+        name          = 'New session profile'
+        unique_id     = 'copilot_cli_new_profile'
+        object_id     = 'copilot_cli_new_profile'
+        command_topic = "$root/newsession/profile/set"
+        options       = $profileOptions
+        icon          = 'mdi:account-cog-outline'
+        device        = $device
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_profile/config" `
+        -Payload ($profileConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    $buttonConfig = @{
+        name          = 'Start new session'
+        unique_id     = 'copilot_cli_new_session'
+        object_id     = 'copilot_cli_new_session'
+        command_topic = "$root/newsession/start"
+        icon          = 'mdi:rocket-launch-outline'
+        device        = $device
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/button/copilot_cli_bridge/new_session/config" `
+        -Payload ($buttonConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    $resultTopic = "$root/newsession/result"
+    $resultConfig = @{
+        name        = 'New session result'
+        unique_id   = 'copilot_cli_new_session_result'
+        object_id   = 'copilot_cli_new_session_result'
+        state_topic = $resultTopic
+        icon        = 'mdi:information-outline'
+        device      = $device
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/sensor/copilot_cli_bridge/new_session_result/config" `
+        -Payload ($resultConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    if ($PSBoundParameters.ContainsKey('LastResult')) {
+        Set-CopilotMqttNewSessionResult -Text $LastResult -Headers $Headers
+    }
+}
+
+function Set-CopilotMqttNewSessionResult {
+    <#
+        Reports the outcome of the last launch. Truncated to the Home Assistant state
+        limit, since a failure detail can easily run past it.
+    #>
+    param(
+        [string]$Text = '',
+        [Parameter(Mandatory)][hashtable]$Headers
+    )
+
+    $value = [string]$Text
+    $limit = $script:CopilotMqttConfig.StateMaxChars
+    if ($value.Length -gt $limit) { $value = $value.Substring(0, $limit - 3) + '...' }
+
+    Publish-CopilotMqttMessage -Topic "$($script:CopilotMqttConfig.TopicRoot)/newsession/result" `
+        -Payload $value -Headers $Headers -Retain
+}
+
 function Publish-CopilotMqttGlobalStatus {
     <#
         Publishes a single global sensor summarising all live sessions, so the

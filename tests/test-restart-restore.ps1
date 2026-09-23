@@ -22,6 +22,11 @@ $ErrorActionPreference = 'Stop'
 $env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
 . (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')
 
+# Keep this run's log lines out of the live daemon log; dot-sourcing the daemon
+# otherwise points Write-DaemonLog straight at it.
+$script:DaemonConfig.LogFile = Join-Path ([IO.Path]::GetTempPath()) "test-restart-restore-$([guid]::NewGuid().ToString('N').Substring(0,8)).log"
+$testLogFile = $script:DaemonConfig.LogFile
+
 $script:Failures = 0
 function Test-That {
     param([string]$Name, [scriptblock]$Condition, [string]$Detail = '')
@@ -136,6 +141,68 @@ Test-That 'the /api/states scan runs once within the TTL' { $script:McpScanCalls
 $script:DaemonMcpCacheAt = [DateTimeOffset]::Now.AddSeconds(-9999)
 $null = Get-LiveMcpSessions -Headers $mcpHeaders
 Test-That 'an expired cache triggers a fresh scan' { $script:McpScanCalls -eq 2 }
+
+Write-Host '--- state persistence survives console detachment ---'
+# Regression. Reply injection does FreeConsole -> AttachConsole -> FreeConsole, and
+# once a daemon has done that, any cmdlet emitting a progress record throws from the
+# host: 'The handle is invalid. 0x6 ... while getting console output buffer
+# information'. That is a host exception rather than an error record, so the
+# -ErrorAction SilentlyContinue on the old Copy-Item backup did not suppress it and
+# every subsequent save failed. Observed live: 331 consecutive failures and a state
+# file that silently stopped advancing from the first injection onward.
+#
+# Run in a child process, because the console juggling would break the rest of this
+# suite's own output.
+$detachDir = Join-Path ([System.IO.Path]::GetTempPath()) ("bridge-detach-test-" + [Guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $detachDir -Force | Out-Null
+$detachScript = Join-Path $detachDir 'detach.ps1'
+$detachResult = Join-Path $detachDir 'result.txt'
+$daemonPath = (Resolve-Path (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')).Path
+
+@"
+`$env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
+. '$daemonPath'
+
+Add-Type -Namespace Detach -Name Con -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool AttachConsole(uint dwProcessId);
+[System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError=true)]
+public static extern bool FreeConsole();
+'@
+
+`$script:DaemonConfig.StateFile = '$($detachDir -replace "'", "''")\state.json'
+`$script:DaemonConfig.LogFile = '$($detachDir -replace "'", "''")\daemon.log'
+`$script:DaemonStateLastWritten = `$null
+
+# Seed a file so the backup branch is exercised - that is where the old code failed.
+Write-DaemonState -State @{ s = @{ Offset = 1 } }
+
+`$victim = Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', 'timeout /t 30 /nobreak' -WindowStyle Hidden -PassThru
+Start-Sleep -Milliseconds 800
+[void][Detach.Con]::FreeConsole()
+[void][Detach.Con]::AttachConsole([uint32]`$victim.Id)
+[void][Detach.Con]::FreeConsole()
+
+Write-DaemonState -State @{ s = @{ Offset = 2 } }
+`$state = Read-DaemonState
+`$ok = (`$state.Count -gt 0) -and ([int]`$state['s'].Offset -eq 2)
+try { Stop-Process -Id `$victim.Id -Force -ErrorAction SilentlyContinue } catch { }
+[System.IO.File]::WriteAllText('$($detachResult -replace "'", "''")', `$(if (`$ok) { 'OK' } else { 'FAIL' }))
+"@ | Set-Content -LiteralPath $detachScript -Encoding UTF8
+
+try {
+    $child = Start-Process -FilePath 'pwsh' -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $detachScript
+    )
+    $child.WaitForExit(90000) | Out-Null
+    $detachOutcome = if (Test-Path -LiteralPath $detachResult) { (Get-Content -LiteralPath $detachResult -Raw).Trim() } else { 'NO RESULT' }
+    Test-That 'a state write succeeds after injection-style console detachment' { $detachOutcome -eq 'OK' } $detachOutcome
+}
+finally {
+    Remove-Item -LiteralPath $detachDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Remove-Item -LiteralPath $testLogFile -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
 if ($script:Failures) {

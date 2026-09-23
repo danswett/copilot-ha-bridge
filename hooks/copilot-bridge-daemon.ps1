@@ -38,6 +38,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'decision-ha-websocket.ps1')
 . (Join-Path $PSScriptRoot 'decision-inject.ps1')
 . (Join-Path $PSScriptRoot 'bridge-update.ps1')
+. (Join-Path $PSScriptRoot 'session-launch.ps1')
 
 $script:DaemonConfig = @{
     MutexName = 'Local\CopilotBridgeDaemon'
@@ -94,6 +95,14 @@ $script:DaemonWatchFailures = 0
 $script:DaemonUpdateAvailable = $false
 $script:DaemonUpdatePublished = $false
 $script:DaemonUpdateLastPress = ''
+
+# New-session control state. The workspace signature is tracked so the discovery
+# payload is only re-published when the configured list actually changes, rather
+# than on every reconcile. Initialised for StrictMode, as above.
+$script:DaemonNewSessionPublished = $false
+$script:DaemonNewSessionSignature = ''
+$script:DaemonNewSessionLastPress = ''
+
 # Anything the dashboard reports as happening before this is a leftover from a
 # previous run rather than something the user just did.
 $script:DaemonStartedAt = [DateTimeOffset]::Now
@@ -497,12 +506,22 @@ function Write-DaemonState {
     $stateFile = $script:DaemonConfig.StateFile
     $temp = "$stateFile.tmp"
     try {
-        Set-Content -LiteralPath $temp -Value $json -Encoding UTF8
+        # Deliberately .NET file APIs rather than Set-Content/Copy-Item.
+        #
+        # Reply injection calls FreeConsole/AttachConsole, and after that cycle the
+        # daemon no longer has a usable console. Any cmdlet that emits a progress
+        # record then throws from the host itself - "The handle is invalid. 0x6 ...
+        # while getting console output buffer information" - and because that is a
+        # host exception, not an error record, -ErrorAction SilentlyContinue does not
+        # suppress it. Copy-Item reports progress, so from the first injection onward
+        # every single save failed and the state file silently stopped advancing.
+        # The .NET equivalents have no progress stream and no host dependency.
+        [System.IO.File]::WriteAllText($temp, $json, [System.Text.UTF8Encoding]::new($false))
         # Preserve the current good file as a backup, then atomically replace the
         # target by rename. A crash can therefore only ever leave a stale-but-valid
         # target plus a partial .tmp, never a truncated target with no fallback.
-        if (Test-Path -LiteralPath $stateFile) {
-            Copy-Item -LiteralPath $stateFile -Destination "$stateFile.bak" -Force -ErrorAction SilentlyContinue
+        if ([System.IO.File]::Exists($stateFile)) {
+            try { [System.IO.File]::Copy($stateFile, "$stateFile.bak", $true) } catch { }
         }
         [System.IO.File]::Move($temp, $stateFile, $true)
         $script:DaemonStateLastWritten = $json
@@ -1273,6 +1292,170 @@ function Sync-DaemonUpdateStatus {
     }
 }
 
+function Sync-DaemonNewSession {
+    <#
+        Publishes the new-session controls, and acts on a press of the launch button.
+
+        Modelled directly on Sync-DaemonUpdateStatus, including the press-timestamp
+        handling: a press from before this daemon started is history left in a
+        retained value, while anything newer is a real instruction. Comparing against
+        the start time rather than simply swallowing the first value seen means a
+        press made moments after a restart still counts.
+
+        The prompt and workspace are read at press time, not watched, because they
+        only matter in combination with a press - and reading them on demand keeps
+        this to one extra state fetch per reconcile when nothing is happening.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Headers)
+
+    if (-not (Get-BridgeSetting 'newSession.enabled' $true)) { return }
+
+    $workspaces = @(Get-BridgeWorkspaceChoices)
+    $launcher = Get-BridgeLauncherKind
+    # Assigned in two steps deliberately: `$x = if (...) { @(...) } else { @() }`
+    # collapses an empty array to $null, and StrictMode then throws on .Count.
+    $profiles = @()
+    if ($launcher -eq 'agency') { $profiles = @(Get-BridgeAgencyProfiles) }
+
+    # Re-publish only when the configured list changes, so an unchanged bridge sends
+    # nothing on a normal reconcile.
+    $signature = (($workspaces | ForEach-Object { "$($_.Label)=$($_.Path)" }) -join '|') +
+        "#$launcher#" + ($profiles -join ',')
+    if (-not $script:DaemonNewSessionPublished -or $signature -ne $script:DaemonNewSessionSignature) {
+        try {
+            Publish-CopilotMqttNewSession -Workspaces $workspaces -Profiles $profiles -Headers $Headers
+            [void](Set-CopilotMqttNewSessionEntityIds)
+            $script:DaemonNewSessionPublished = $true
+            $script:DaemonNewSessionSignature = $signature
+            Write-DaemonLog -Message "new-session controls published ($($workspaces.Count) workspace(s), launcher $launcher$(if ($profiles.Count) { ", profiles: $($profiles -join ', ')" }))"
+        }
+        catch {
+            Write-DaemonLog -Message "new-session publish failed: $($_.Exception.Message)"
+            return
+        }
+    }
+
+    try {
+        $button = Get-HomeAssistantState -EntityId 'button.copilot_cli_new_session' -Headers $Headers
+        $press = [string]$button.state
+    }
+    catch {
+        # The button may not exist yet on a first run.
+        return
+    }
+
+    if ($press -in @('unknown', 'unavailable', '')) { return }
+    if ($press -eq $script:DaemonNewSessionLastPress) { return }
+    $script:DaemonNewSessionLastPress = $press
+
+    $pressedAt = [DateTimeOffset]::MinValue
+    if (-not [DateTimeOffset]::TryParse($press, [ref]$pressedAt)) { return }
+    if ($pressedAt -le $script:DaemonStartedAt) { return }
+
+    if ($workspaces.Count -eq 0) {
+        Write-DaemonLog -Message 'new session requested but no workspaces are configured'
+        Set-CopilotMqttNewSessionResult -Headers $Headers `
+            -Text 'No workspaces configured - add newSession.workspaces to the bridge config'
+        return
+    }
+
+    $label = ''
+    try {
+        $selected = Get-HomeAssistantState -EntityId 'select.copilot_cli_new_workspace' -Headers $Headers
+        $label = [string]$selected.state
+    }
+    catch { }
+
+    # An untouched optimistic select reads as unknown, which should mean "the obvious
+    # one" rather than an error the user has to go and fix on a phone.
+    if ($label -in @('unknown', 'unavailable', '') -or [string]::IsNullOrWhiteSpace($label)) {
+        $label = $workspaces[0].Label
+    }
+
+    $directory = Resolve-BridgeWorkspacePath -Label $label
+    if ([string]::IsNullOrWhiteSpace($directory)) {
+        Write-DaemonLog -Message "new session requested for unknown workspace '$label'"
+        Set-CopilotMqttNewSessionResult -Text "Unknown workspace '$label'" -Headers $Headers
+        return
+    }
+
+    $prompt = ''
+    try {
+        $promptState = Get-HomeAssistantState -EntityId 'text.copilot_cli_new_prompt' -Headers $Headers
+        $prompt = [string]$promptState.state
+    }
+    catch { }
+    if ($prompt -in @('unknown', 'unavailable')) { $prompt = '' }
+    $prompt = $prompt.Trim()
+
+    # The profile only applies under Agency. An untouched selector falls back to the
+    # first configured profile, and an unrecognised one is refused outright rather
+    # than passed to a command line.
+    $agencyProfile = ''
+    if ($launcher -eq 'agency' -and $profiles.Count -gt 0) {
+        $profileLabel = ''
+        try {
+            $profileState = Get-HomeAssistantState -EntityId 'select.copilot_cli_new_profile' -Headers $Headers
+            $profileLabel = [string]$profileState.state
+        }
+        catch { }
+
+        if ($profileLabel -in @('unknown', 'unavailable', '') -or [string]::IsNullOrWhiteSpace($profileLabel)) {
+            $profileLabel = $profiles[0]
+        }
+
+        $agencyProfile = Resolve-BridgeAgencyProfile -Name $profileLabel
+        if ([string]::IsNullOrWhiteSpace($agencyProfile)) {
+            Write-DaemonLog -Message "new session requested with unknown profile '$profileLabel'"
+            Set-CopilotMqttNewSessionResult -Text "Unknown profile '$profileLabel'" -Headers $Headers
+            return
+        }
+    }
+
+    Write-DaemonLog -Message "new session requested in '$label' ($directory)$(if ($agencyProfile) { " profile '$agencyProfile'" })$(if ($prompt) { " with prompt: $prompt" })"
+    Set-CopilotMqttNewSessionResult -Headers $Headers `
+        -Text "Starting a session in $label$(if ($agencyProfile) { " ($agencyProfile)" })..."
+
+    $launch = Start-BridgeCopilotSession -WorkingDirectory $directory -Prompt $prompt -AgencyProfile $agencyProfile
+    if (-not $launch.Launched) {
+        Write-DaemonLog -Message "new session launch failed: $($launch.Detail)"
+        Set-CopilotMqttNewSessionResult -Text "Launch failed: $($launch.Detail)" -Headers $Headers
+        return
+    }
+
+    Write-DaemonLog -Message "new session launched: $($launch.Detail) (session $($launch.SessionId))"
+
+    # The process id only proves something started. Waiting for the session's own
+    # lock file proves the CLI got far enough to be a session the daemon can adopt,
+    # so the dashboard reports what actually happened rather than an optimistic
+    # guess. The next reconcile publishes the session itself.
+    if (Wait-BridgeSessionRegistered -SessionId $launch.SessionId) {
+        $short = $launch.SessionId.Substring(0, [Math]::Min(8, $launch.SessionId.Length))
+        $where = if ($agencyProfile) { "$label ($agencyProfile)" } else { $label }
+        Set-CopilotMqttNewSessionResult -Headers $Headers `
+            -Text "Started $short in $where at $([DateTimeOffset]::Now.ToString('HH:mm'))"
+    }
+    else {
+        Write-DaemonLog -Message "new session $($launch.SessionId) did not register within the timeout"
+        Set-CopilotMqttNewSessionResult -Headers $Headers `
+            -Text "Started pid $($launch.ProcessId) in $label, but it has not registered yet"
+    }
+
+    # Clear the prompt box so the next launch starts from a blank field instead of
+    # silently reusing the previous prompt.
+    if ($prompt) {
+        try {
+            Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers -Data @{
+                entity_id = 'text.copilot_cli_new_prompt'
+                value     = $script:DaemonConfig.ReplyBlankValue
+            }
+        }
+        catch {
+            Write-DaemonLog -Message "could not clear the new-session prompt: $($_.Exception.Message)"
+        }
+    }
+}
+
 function Sync-DaemonSessions {
     <#
         Brings the published Home Assistant entities in line with the live sessions,
@@ -1642,7 +1825,8 @@ function Sync-DaemonSessions {
     if ($signature -ne $script:DaemonDashboardSignature) {
         try {
             [void](Set-CopilotMqttGlobalEntityId)
-            Save-CopilotSessionDashboard -Sessions $descriptors
+            Save-CopilotSessionDashboard -Sessions $descriptors `
+                -IncludeProfile:((Get-BridgeSetting 'newSession.enabled' $true) -and (Get-BridgeLauncherKind) -eq 'agency')
             $script:DaemonDashboardSignature = $signature
             Write-DaemonLog -Message "dashboard rebuilt for $($descriptors.Count) session(s)"
         }
@@ -1953,6 +2137,7 @@ function Start-BridgeDaemon {
     Invoke-PendingReplies -Headers $headers -State $state -Live $live
     Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
     Sync-DaemonUpdateStatus -Headers $headers
+    Sync-DaemonNewSession -Headers $headers
     Write-DaemonState -State $state
 
     if ($RunOnce) {
@@ -2017,6 +2202,7 @@ function Start-BridgeDaemon {
                 Invoke-PendingReplies -Headers $headers -State $state -Live $live
                 Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
                 Sync-DaemonUpdateStatus -Headers $headers
+                Sync-DaemonNewSession -Headers $headers
                 Write-DaemonState -State $state
             }
             catch {

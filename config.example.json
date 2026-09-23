@@ -15,6 +15,20 @@
   "copilot": {
     "sessionStateRoot": ""
   },
+  "newSession": {
+    "enabled": true,
+    "launcher": "auto",
+    "profiles": ["work", "home", "local"],
+    "workspaces": [
+      { "label": "Bridge", "path": "~/repos/copilot-ha-bridge" },
+      "~/repos"
+    ],
+    "model": "",
+    "allowAllTools": false,
+    "extraArgs": [],
+    "copilotPath": "",
+    "agencyPath": ""
+  },
   "clients": ["copilot"],
   "updates": {
     "repository": "danswett/copilot-ha-bridge",
