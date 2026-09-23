@@ -67,6 +67,10 @@ $script:DaemonConfig = @{
     # A single space renders as a genuinely blank field instead, so the reply box looks
     # ready to type in. Everything that reads the box treats whitespace as empty.
     ReplyBlankValue = ' '
+    # The resumable-session list comes from an Agency call that reads every session
+    # on the machine, so it is cached for this long instead of being repeated on
+    # every reconcile.
+    ResumeCacheSeconds = 180
 }
 
 # Session-set signature of the last dashboard rebuild, so the dashboard is only
@@ -102,6 +106,12 @@ $script:DaemonUpdateLastPress = ''
 $script:DaemonNewSessionPublished = $false
 $script:DaemonNewSessionSignature = ''
 $script:DaemonNewSessionLastPress = ''
+
+# Cached resumable-session list. The Agency query behind it returns hundreds of
+# sessions and takes over a second, so it is refreshed on a timer rather than on
+# every reconcile. Initialised for StrictMode, as above.
+$script:DaemonResumeCache = @()
+$script:DaemonResumeCacheAt = [DateTimeOffset]::MinValue
 
 # Anything the dashboard reports as happening before this is a leftover from a
 # previous run rather than something the user just did.
@@ -1292,6 +1302,123 @@ function Sync-DaemonUpdateStatus {
     }
 }
 
+function Get-DaemonResumableSessions {
+    <#
+        The cached list of sessions offered in the resume dropdown.
+
+        Behind this is `agency hub list-local-sessions --json`, which on a working
+        machine describes hundreds of sessions in half a megabyte and takes over a
+        second. Running that every 15 seconds would be a waste, and the list barely
+        changes, so it is refreshed on a timer and served from memory in between.
+
+        Live sessions are excluded every time, from the current live set rather than
+        from the cache, so a session that has just started cannot be offered for
+        resume while it is still running - two CLIs sharing one transcript would
+        corrupt it.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$LiveSessionIds,
+        [switch]$Force
+    )
+
+    $age = ([DateTimeOffset]::Now - $script:DaemonResumeCacheAt).TotalSeconds
+    if ($Force.IsPresent -or $age -ge $script:DaemonConfig.ResumeCacheSeconds) {
+        try {
+            $script:DaemonResumeCache = @(Get-BridgeResumableSessions)
+            $script:DaemonResumeCacheAt = [DateTimeOffset]::Now
+        }
+        catch {
+            Write-DaemonLog -Message "resumable session list failed: $($_.Exception.Message)"
+            $script:DaemonResumeCacheAt = [DateTimeOffset]::Now
+        }
+    }
+
+    $live = @{}
+    foreach ($id in @($LiveSessionIds)) {
+        if (-not [string]::IsNullOrWhiteSpace($id)) { $live[[string]$id] = $true }
+    }
+
+    @(@($script:DaemonResumeCache) | Where-Object { -not $live.ContainsKey([string]$_.SessionId) })
+}
+
+function Set-DaemonNewSessionDefaults {
+    <#
+        Keeps the new-session selectors showing a usable default.
+
+        They are optimistic MQTT entities, so Home Assistant has nothing to restore
+        them from: they read `unknown` when first created and again after every
+        restart. Left alone, the card opens on "unknown" and pressing Launch looks
+        like it is guessing. Driving them to the configured default makes the whole
+        flow one button press, and re-driving whenever they fall back to `unknown`
+        repairs them after a Home Assistant restart - the same approach
+        Repair-CopilotSessionEntities takes for the per-session entities.
+
+        A value the user has actually chosen is never overwritten; only `unknown`,
+        `unavailable`, and options that no longer exist are replaced.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Workspaces,
+        [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$Profiles,
+        [AllowEmptyCollection()][object[]]$Resumable = @()
+    )
+
+    $stale = @('unknown', 'unavailable', '')
+
+    if ($Workspaces.Count -gt 0) {
+        $default = Get-BridgeDefaultWorkspaceLabel
+        if (-not [string]::IsNullOrWhiteSpace($default)) {
+            try {
+                $current = [string](Get-HomeAssistantState -EntityId 'select.copilot_cli_new_workspace' -Headers $Headers).state
+                $valid = @($Workspaces | ForEach-Object { [string]$_.Label })
+                if ($current -in $stale -or $valid -notcontains $current) {
+                    Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers `
+                        -Data @{ entity_id = 'select.copilot_cli_new_workspace'; option = $default }
+                }
+            }
+            catch { }
+        }
+    }
+
+    if ($Profiles.Count -gt 0) {
+        $default = Get-BridgeDefaultAgencyProfile
+        if (-not [string]::IsNullOrWhiteSpace($default)) {
+            try {
+                $current = [string](Get-HomeAssistantState -EntityId 'select.copilot_cli_new_profile' -Headers $Headers).state
+                if ($current -in $stale -or $Profiles -notcontains $current) {
+                    Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers `
+                        -Data @{ entity_id = 'select.copilot_cli_new_profile'; option = $default }
+                }
+            }
+            catch { }
+        }
+    }
+
+    # The prompt is optional, so it should look empty and inviting rather than
+    # reading "unknown" as though something were wrong.
+    try {
+        $current = [string](Get-HomeAssistantState -EntityId 'text.copilot_cli_new_prompt' -Headers $Headers).state
+        if ($current -in @('unknown', 'unavailable')) {
+            Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers `
+                -Data @{ entity_id = 'text.copilot_cli_new_prompt'; value = $script:DaemonConfig.ReplyBlankValue }
+        }
+    }
+    catch { }
+
+    # Resume defaults to "New session" and is reset there whenever the selected
+    # session drops off the list, so a stale pick can never launch something
+    # unexpected on the next press.
+    try {
+        $current = [string](Get-HomeAssistantState -EntityId 'select.copilot_cli_new_resume' -Headers $Headers).state
+        $valid = @($script:CopilotMqttNewSessionOption) + @($Resumable | ForEach-Object { [string]$_.Label })
+        if ($current -in $stale -or $valid -notcontains $current) {
+            Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers `
+                -Data @{ entity_id = 'select.copilot_cli_new_resume'; option = $script:CopilotMqttNewSessionOption }
+        }
+    }
+    catch { }
+}
+
 function Sync-DaemonNewSession {
     <#
         Publishes the new-session controls, and acts on a press of the launch button.
@@ -1302,11 +1429,13 @@ function Sync-DaemonNewSession {
         the start time rather than simply swallowing the first value seen means a
         press made moments after a restart still counts.
 
-        The prompt and workspace are read at press time, not watched, because they
-        only matter in combination with a press - and reading them on demand keeps
-        this to one extra state fetch per reconcile when nothing is happening.
+        The prompt, workspace, profile and resume choice are read at press time, not
+        watched, because they only matter in combination with a press.
     #>
-    param([Parameter(Mandatory)][hashtable]$Headers)
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [Parameter(Mandatory)][hashtable]$Live
+    )
 
     if (-not (Get-BridgeSetting 'newSession.enabled' $true)) { return }
 
@@ -1317,23 +1446,29 @@ function Sync-DaemonNewSession {
     $profiles = @()
     if ($launcher -eq 'agency') { $profiles = @(Get-BridgeAgencyProfiles) }
 
+    $resumable = @(Get-DaemonResumableSessions -LiveSessionIds @($Live.Keys))
+
     # Re-publish only when the configured list changes, so an unchanged bridge sends
     # nothing on a normal reconcile.
     $signature = (($workspaces | ForEach-Object { "$($_.Label)=$($_.Path)" }) -join '|') +
-        "#$launcher#" + ($profiles -join ',')
+        "#$launcher#" + ($profiles -join ',') +
+        '#' + (($resumable | ForEach-Object { [string]$_.SessionId }) -join ',')
     if (-not $script:DaemonNewSessionPublished -or $signature -ne $script:DaemonNewSessionSignature) {
         try {
-            Publish-CopilotMqttNewSession -Workspaces $workspaces -Profiles $profiles -Headers $Headers
+            Publish-CopilotMqttNewSession -Workspaces $workspaces -Profiles $profiles `
+                -Resumable $resumable -Headers $Headers
             [void](Set-CopilotMqttNewSessionEntityIds)
             $script:DaemonNewSessionPublished = $true
             $script:DaemonNewSessionSignature = $signature
-            Write-DaemonLog -Message "new-session controls published ($($workspaces.Count) workspace(s), launcher $launcher$(if ($profiles.Count) { ", profiles: $($profiles -join ', ')" }))"
+            Write-DaemonLog -Message "new-session controls published ($($workspaces.Count) workspace(s), launcher $launcher$(if ($profiles.Count) { ", profiles: $($profiles -join ', ')" }), $($resumable.Count) resumable)"
         }
         catch {
             Write-DaemonLog -Message "new-session publish failed: $($_.Exception.Message)"
             return
         }
     }
+
+    Set-DaemonNewSessionDefaults -Headers $Headers -Workspaces $workspaces -Profiles $profiles -Resumable $resumable
 
     try {
         $button = Get-HomeAssistantState -EntityId 'button.copilot_cli_new_session' -Headers $Headers
@@ -1366,10 +1501,10 @@ function Sync-DaemonNewSession {
     }
     catch { }
 
-    # An untouched optimistic select reads as unknown, which should mean "the obvious
-    # one" rather than an error the user has to go and fix on a phone.
+    # An untouched optimistic select reads as unknown, which should mean "the
+    # configured default" rather than an error the user has to go and fix on a phone.
     if ($label -in @('unknown', 'unavailable', '') -or [string]::IsNullOrWhiteSpace($label)) {
-        $label = $workspaces[0].Label
+        $label = Get-BridgeDefaultWorkspaceLabel
     }
 
     $directory = Resolve-BridgeWorkspacePath -Label $label
@@ -1401,7 +1536,7 @@ function Sync-DaemonNewSession {
         catch { }
 
         if ($profileLabel -in @('unknown', 'unavailable', '') -or [string]::IsNullOrWhiteSpace($profileLabel)) {
-            $profileLabel = $profiles[0]
+            $profileLabel = Get-BridgeDefaultAgencyProfile
         }
 
         $agencyProfile = Resolve-BridgeAgencyProfile -Name $profileLabel
@@ -1412,11 +1547,50 @@ function Sync-DaemonNewSession {
         }
     }
 
-    Write-DaemonLog -Message "new session requested in '$label' ($directory)$(if ($agencyProfile) { " profile '$agencyProfile'" })$(if ($prompt) { " with prompt: $prompt" })"
-    Set-CopilotMqttNewSessionResult -Headers $Headers `
-        -Text "Starting a session in $label$(if ($agencyProfile) { " ($agencyProfile)" })..."
+    # Resume, if one is selected. The chosen session brings its own working
+    # directory: resuming a conversation somewhere other than where it happened
+    # would point the agent at the wrong tree. The workspace selector is therefore
+    # ignored for a resume, and only the profile still applies.
+    $resumeSession = $null
+    $resumeLabel = ''
+    try {
+        $resumeState = Get-HomeAssistantState -EntityId 'select.copilot_cli_new_resume' -Headers $Headers
+        $resumeLabel = [string]$resumeState.state
+        if (-not [string]::IsNullOrWhiteSpace($resumeLabel) -and
+            $resumeLabel -notin @('unknown', 'unavailable', $script:CopilotMqttNewSessionOption)) {
+            $resumeSession = @($resumable) | Where-Object { $_.Label -eq $resumeLabel } | Select-Object -First 1
+            if ($null -eq $resumeSession) {
+                Write-DaemonLog -Message "resume requested for unknown session '$resumeLabel'"
+                Set-CopilotMqttNewSessionResult -Text "That session is no longer resumable" -Headers $Headers
+                return
+            }
+        }
+    }
+    catch { }
 
-    $launch = Start-BridgeCopilotSession -WorkingDirectory $directory -Prompt $prompt -AgencyProfile $agencyProfile
+    if ($null -ne $resumeSession) {
+        $resumeDirectory = [string]$resumeSession.Folder
+        if ([string]::IsNullOrWhiteSpace($resumeDirectory) -or -not [System.IO.Directory]::Exists($resumeDirectory)) {
+            # The folder it ran in has gone. Falling back to the selected workspace
+            # keeps the resume possible rather than failing outright.
+            $resumeDirectory = $directory
+        }
+
+        $short = $resumeSession.SessionId.Substring(0, [Math]::Min(8, $resumeSession.SessionId.Length))
+        Write-DaemonLog -Message "resume requested for $short ($resumeDirectory)$(if ($agencyProfile) { " profile '$agencyProfile'" })"
+        Set-CopilotMqttNewSessionResult -Text "Resuming $resumeLabel..." -Headers $Headers
+
+        $launch = Start-BridgeCopilotSession -WorkingDirectory $resumeDirectory -Prompt $prompt `
+            -AgencyProfile $agencyProfile -SessionId ([string]$resumeSession.SessionId) -Resume
+    }
+    else {
+        Write-DaemonLog -Message "new session requested in '$label' ($directory)$(if ($agencyProfile) { " profile '$agencyProfile'" })$(if ($prompt) { " with prompt: $prompt" })"
+        Set-CopilotMqttNewSessionResult -Headers $Headers `
+            -Text "Starting a session in $label$(if ($agencyProfile) { " ($agencyProfile)" })..."
+
+        $launch = Start-BridgeCopilotSession -WorkingDirectory $directory -Prompt $prompt -AgencyProfile $agencyProfile
+    }
+
     if (-not $launch.Launched) {
         Write-DaemonLog -Message "new session launch failed: $($launch.Detail)"
         Set-CopilotMqttNewSessionResult -Text "Launch failed: $($launch.Detail)" -Headers $Headers
@@ -1425,21 +1599,33 @@ function Sync-DaemonNewSession {
 
     Write-DaemonLog -Message "new session launched: $($launch.Detail) (session $($launch.SessionId))"
 
+    $verb = if ($null -ne $resumeSession) { 'Resumed' } else { 'Started' }
+    $where = if ($null -ne $resumeSession) {
+        if ($agencyProfile) { "$resumeLabel ($agencyProfile)" } else { [string]$resumeLabel }
+    }
+    elseif ($agencyProfile) { "$label ($agencyProfile)" }
+    else { $label }
+
     # The process id only proves something started. Waiting for the session's own
     # lock file proves the CLI got far enough to be a session the daemon can adopt,
     # so the dashboard reports what actually happened rather than an optimistic
     # guess. The next reconcile publishes the session itself.
     if (Wait-BridgeSessionRegistered -SessionId $launch.SessionId) {
         $short = $launch.SessionId.Substring(0, [Math]::Min(8, $launch.SessionId.Length))
-        $where = if ($agencyProfile) { "$label ($agencyProfile)" } else { $label }
         Set-CopilotMqttNewSessionResult -Headers $Headers `
-            -Text "Started $short in $where at $([DateTimeOffset]::Now.ToString('HH:mm'))"
+            -Text "$verb $short in $where at $([DateTimeOffset]::Now.ToString('HH:mm'))"
     }
     else {
         Write-DaemonLog -Message "new session $($launch.SessionId) did not register within the timeout"
         Set-CopilotMqttNewSessionResult -Headers $Headers `
-            -Text "Started pid $($launch.ProcessId) in $label, but it has not registered yet"
+            -Text "$verb pid $($launch.ProcessId) in $where, but it has not registered yet"
     }
+
+    # A launch changes what is resumable - the session just started is now live, and
+    # a resumed one has to leave the list - so the cache is expired rather than left
+    # to age out, and the selector re-primed to "New session" on the next reconcile.
+    $script:DaemonResumeCacheAt = [DateTimeOffset]::MinValue
+    $script:DaemonNewSessionSignature = ''
 
     # Clear the prompt box so the next launch starts from a blank field instead of
     # silently reusing the previous prompt.
@@ -1826,7 +2012,8 @@ function Sync-DaemonSessions {
         try {
             [void](Set-CopilotMqttGlobalEntityId)
             Save-CopilotSessionDashboard -Sessions $descriptors `
-                -IncludeProfile:((Get-BridgeSetting 'newSession.enabled' $true) -and (Get-BridgeLauncherKind) -eq 'agency')
+                -IncludeProfile:((Get-BridgeSetting 'newSession.enabled' $true) -and (Get-BridgeLauncherKind) -eq 'agency') `
+                -IncludeResume:((Get-BridgeSetting 'newSession.enabled' $true) -and $null -ne (Get-BridgeAgencyPath))
             $script:DaemonDashboardSignature = $signature
             Write-DaemonLog -Message "dashboard rebuilt for $($descriptors.Count) session(s)"
         }
@@ -2137,7 +2324,7 @@ function Start-BridgeDaemon {
     Invoke-PendingReplies -Headers $headers -State $state -Live $live
     Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
     Sync-DaemonUpdateStatus -Headers $headers
-    Sync-DaemonNewSession -Headers $headers
+    Sync-DaemonNewSession -Headers $headers -Live $live
     Write-DaemonState -State $state
 
     if ($RunOnce) {
@@ -2202,7 +2389,7 @@ function Start-BridgeDaemon {
                 Invoke-PendingReplies -Headers $headers -State $state -Live $live
                 Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
                 Sync-DaemonUpdateStatus -Headers $headers
-                Sync-DaemonNewSession -Headers $headers
+                Sync-DaemonNewSession -Headers $headers -Live $live
                 Write-DaemonState -State $state
             }
             catch {
@@ -2237,3 +2424,4 @@ if (-not $env:COPILOT_BRIDGE_DAEMON_NORUN) {
         $mutex.Dispose()
     }
 }
+

@@ -487,6 +487,7 @@ function Set-CopilotMqttNewSessionEntityIds {
         'copilot_cli_new_prompt'         = 'text.copilot_cli_new_prompt'
         'copilot_cli_new_workspace'      = 'select.copilot_cli_new_workspace'
         'copilot_cli_new_profile'        = 'select.copilot_cli_new_profile'
+        'copilot_cli_new_resume'         = 'select.copilot_cli_new_resume'
         'copilot_cli_new_session'        = 'button.copilot_cli_new_session'
         'copilot_cli_new_session_result' = 'sensor.copilot_cli_new_session_result'
     }
@@ -534,7 +535,10 @@ function Save-CopilotSessionDashboard {
         [string]$VerboseToggle = 'input_boolean.copilot_cli_live_verbose',
 
         # Whether to show the Agency profile row on the new-session card.
-        [switch]$IncludeProfile
+        [switch]$IncludeProfile,
+
+        # Whether to show the resume row on the new-session card.
+        [switch]$IncludeResume
     )
 
     $decisionEntities = @($Sessions | ForEach-Object { "select.$($_.Node)_decision" })
@@ -581,18 +585,25 @@ function Save-CopilotSessionDashboard {
         }
     }
 
-    $newSessionRows = @(
-        @{ entity = 'select.copilot_cli_new_workspace'; name = 'Workspace' }
-    )
+    $newSessionRows = @()
+    # Resume first: it decides whether the rows under it even apply. Defaults to
+    # "New session", so the common case reads top-to-bottom as a fresh launch.
+    if ($IncludeResume) {
+        $newSessionRows += @{ entity = 'select.copilot_cli_new_resume'; name = 'Resume' }
+    }
+    $newSessionRows += @{ entity = 'select.copilot_cli_new_workspace'; name = 'Workspace' }
     # The profile row is only meaningful when Agency is the launcher, so it is left
     # out entirely rather than shown as a control that does nothing.
     if ($IncludeProfile) {
         $newSessionRows += @{ entity = 'select.copilot_cli_new_profile'; name = 'Profile' }
     }
+    # Launch sits directly under the selectors, because they all carry a default and
+    # a launch therefore needs no input at all - open the card, press Launch. The
+    # opening prompt is genuinely optional and goes last so it stays out of that path.
     $newSessionRows += @(
-        @{ entity = 'text.copilot_cli_new_prompt'; name = 'Opening prompt' }
         @{ entity = 'button.copilot_cli_new_session'; name = 'Launch' }
         @{ entity = 'sensor.copilot_cli_new_session_result'; name = 'Last launch' }
+        @{ entity = 'text.copilot_cli_new_prompt'; name = 'Opening prompt (optional)' }
     )
 
     # Starting a new session. Placed with the controls rather than among the session

@@ -153,6 +153,29 @@ $script:FakeSettings = @{ 'newSession.workspaces' = @() }
 Test-That 'no configuration yields no choices' { @(Get-BridgeWorkspaceChoices).Count -eq 0 }
 
 Write-Host ''
+Write-Host '--- defaults, so a launch needs no input ---'
+
+$script:FakeSettings = @{ 'newSession.workspaces' = @($alpha, $beta) }
+Test-That 'the first workspace is the default when none is configured' {
+    (Get-BridgeDefaultWorkspaceLabel) -eq 'alpha'
+}
+$script:FakeSettings = @{ 'newSession.workspaces' = @($alpha, $beta); 'newSession.defaultWorkspace' = 'beta' }
+Test-That 'a configured default workspace is used' { (Get-BridgeDefaultWorkspaceLabel) -eq 'beta' }
+$script:FakeSettings = @{ 'newSession.workspaces' = @($alpha, $beta); 'newSession.defaultWorkspace' = 'gone' }
+Test-That 'a default naming a missing workspace falls back to the first' {
+    (Get-BridgeDefaultWorkspaceLabel) -eq 'alpha'
+}
+$script:FakeSettings = @{ 'newSession.workspaces' = @() }
+Test-That 'no workspaces means no default' { (Get-BridgeDefaultWorkspaceLabel) -eq '' }
+
+$script:FakeSettings = @{ 'newSession.profiles' = @('work', 'home') }
+Test-That 'the first profile is the default when none is configured' { (Get-BridgeDefaultAgencyProfile) -eq 'work' }
+$script:FakeSettings = @{ 'newSession.profiles' = @('work', 'home'); 'newSession.defaultProfile' = 'home' }
+Test-That 'a configured default profile is used' { (Get-BridgeDefaultAgencyProfile) -eq 'home' }
+$script:FakeSettings = @{ 'newSession.profiles' = @('work', 'home'); 'newSession.defaultProfile' = 'nope' }
+Test-That 'a default naming a missing profile falls back to the first' { (Get-BridgeDefaultAgencyProfile) -eq 'work' }
+
+Write-Host ''
 Write-Host '--- label resolution is the security boundary ---'
 
 $script:FakeSettings = @{ 'newSession.workspaces' = @($alpha) }
@@ -262,6 +285,67 @@ $script:FakeSettings = @{ 'newSession.launcher' = 'AGENCY' }
 $script:AgencyPresent = $true
 Test-That 'the launcher setting is case-insensitive' { (Get-BridgeLauncherKind) -eq 'agency' }
 
+# --- the resume list ---------------------------------------------------------------
+
+Write-Host ''
+Write-Host '--- the resumable session list ---'
+
+# Shadow the one slow, machine-dependent step so the parsing is testable offline.
+$script:AgencyJson = ''
+function Get-BridgeAgencySessionJson { $script:AgencyJson }
+
+function Set-AgencySessions {
+    param([object[]]$Sessions)
+    $script:AgencyJson = (@{ sessions = $Sessions } | ConvertTo-Json -Depth 8)
+}
+
+$script:FakeSettings = @{ 'newSession.resumeCount' = 10 }
+
+Set-AgencySessions -Sessions @(
+    @{ session_id = 'aaaaaaaa-0000-0000-0000-000000000001'; summary = 'Older work'; folder = 'C:\repos\alpha'; can_resume = $true;  updated_at = '2026-09-20T10:00:00Z' }
+    @{ session_id = 'bbbbbbbb-0000-0000-0000-000000000002'; summary = 'Newest work'; folder = 'C:\repos\beta'; can_resume = $true;  updated_at = '2026-09-23T10:00:00Z' }
+    @{ session_id = 'cccccccc-0000-0000-0000-000000000003'; summary = 'A VS Code one'; folder = 'C:\repos\beta'; can_resume = $false; updated_at = '2026-09-23T11:00:00Z' }
+    @{ session_id = 'dddddddd-0000-0000-0000-000000000004'; summary = '';             folder = 'C:\repos\beta'; can_resume = $true;  updated_at = '2026-09-21T10:00:00Z' }
+)
+$resume = @(Get-BridgeResumableSessions)
+
+Test-That 'non-resumable sessions are dropped' { $resume.SessionId -notcontains 'cccccccc-0000-0000-0000-000000000003' }
+Test-That 'the newest session comes first' { $resume[0].SessionId -eq 'bbbbbbbb-0000-0000-0000-000000000002' }
+Test-That 'the label carries the summary and the folder' { $resume[0].Label -eq 'Newest work - beta' }
+Test-That 'a session with no summary still gets a usable label' {
+    ($resume | Where-Object { $_.SessionId -like 'dddddddd*' }).Label -match '^Session dddddddd'
+}
+Test-That 'the folder is carried through for the working directory' { $resume[0].Folder -eq 'C:\repos\beta' }
+
+$excluded = @(Get-BridgeResumableSessions -Exclude @('bbbbbbbb-0000-0000-0000-000000000002'))
+Test-That 'a live session is excluded' { $excluded.SessionId -notcontains 'bbbbbbbb-0000-0000-0000-000000000002' }
+
+$limited = @(Get-BridgeResumableSessions -Limit 1)
+Test-That 'the list honours its limit' { $limited.Count -eq 1 -and $limited[0].SessionId -eq 'bbbbbbbb-0000-0000-0000-000000000002' }
+
+Set-AgencySessions -Sessions @(
+    @{ session_id = 'aaaaaaaa-0000-0000-0000-000000000001'; summary = 'Same name'; folder = 'C:\repos\alpha'; can_resume = $true; updated_at = '2026-09-23T10:00:00Z' }
+    @{ session_id = 'bbbbbbbb-0000-0000-0000-000000000002'; summary = 'Same name'; folder = 'C:\repos\alpha'; can_resume = $true; updated_at = '2026-09-22T10:00:00Z' }
+)
+$dupes = @(Get-BridgeResumableSessions)
+Test-That 'two sessions with the same summary stay distinguishable' {
+    $dupes.Count -eq 2 -and ($dupes.Label | Sort-Object -Unique).Count -eq 2
+}
+
+Set-AgencySessions -Sessions @(
+    @{ session_id = 'eeeeeeee-0000-0000-0000-000000000005'; summary = ('z' * 400); folder = 'C:\repos\alpha'; can_resume = $true; updated_at = '2026-09-23T10:00:00Z' }
+)
+Test-That 'a very long summary is trimmed to stay a valid option' {
+    (Get-BridgeResumableSessions)[0].Label.Length -le 130
+}
+
+$script:AgencyJson = 'not json at all'
+Test-That 'malformed output yields an empty list rather than throwing' { @(Get-BridgeResumableSessions).Count -eq 0 }
+$script:AgencyJson = ''
+Test-That 'no Agency output yields an empty list' { @(Get-BridgeResumableSessions).Count -eq 0 }
+$script:AgencyJson = '{"unexpected":true}'
+Test-That 'output without a sessions array yields an empty list' { @(Get-BridgeResumableSessions).Count -eq 0 }
+
 # --- discovery payloads ----------------------------------------------------------
 
 Write-Host ''
@@ -277,7 +361,9 @@ $script:MqttMsgs = @()
 Publish-CopilotMqttNewSession -Workspaces @(
     [pscustomobject]@{ Label = 'alpha'; Path = $alpha }
     [pscustomobject]@{ Label = 'Beta project'; Path = $beta }
-) -Profiles @('work', 'home') -Headers $headers
+) -Profiles @('work', 'home') -Resumable @(
+    [pscustomobject]@{ Label = 'Fix the thing - alpha'; SessionId = 'aaaaaaaa-0000-0000-0000-000000000001'; Folder = 'C:\repos\alpha' }
+) -Headers $headers
 
 function Get-Config { param([string]$Match) ($script:MqttMsgs | Where-Object { $_.Topic -match $Match } | Select-Object -First 1).Payload }
 
@@ -286,6 +372,9 @@ Test-That 'a workspace select is published'    { (Get-Config 'select/copilot_cli
 Test-That 'a profile select is published'      { (Get-Config 'select/copilot_cli_bridge/new_profile/config') -match '"unique_id":"copilot_cli_new_profile"' }
 Test-That 'the profile select offers the profiles' { (Get-Config 'new_profile/config') -match 'work' -and (Get-Config 'new_profile/config') -match 'home' }
 Test-That 'a launch button is published'       { (Get-Config 'button/copilot_cli_bridge/new_session/config') -match '"unique_id":"copilot_cli_new_session"' }
+Test-That 'a resume select is published'       { (Get-Config 'select/copilot_cli_bridge/new_resume/config') -match '"unique_id":"copilot_cli_new_resume"' }
+Test-That 'resume defaults to starting fresh'  { (Get-Config 'new_resume/config') -match '"options":\["New session"' }
+Test-That 'the resume list offers the session' { (Get-Config 'new_resume/config') -match 'Fix the thing - alpha' }
 Test-That 'a result sensor is published'       { (Get-Config 'sensor/copilot_cli_bridge/new_session_result/config') -match '"unique_id":"copilot_cli_new_session_result"' }
 Test-That 'the select offers both workspaces'  { (Get-Config 'new_workspace/config') -match 'alpha' -and (Get-Config 'new_workspace/config') -match 'Beta project' }
 Test-That 'they all land on the bridge device' { (Get-Config 'new_prompt/config') -match '"identifiers":\["copilot_cli_bridge"\]' }
@@ -324,16 +413,20 @@ function Get-HomeAssistantState {
     if (-not $script:HaStates.ContainsKey($EntityId)) { throw "no such entity $EntityId" }
     [pscustomobject]@{ state = $script:HaStates[$EntityId] }
 }
-function Publish-CopilotMqttNewSession { param([object[]]$Workspaces, [string[]]$Profiles = @(), [string]$LastResult = '', [hashtable]$Headers) }
+function Publish-CopilotMqttNewSession { param([object[]]$Workspaces, [string[]]$Profiles = @(), [object[]]$Resumable = @(), [string]$LastResult = '', [hashtable]$Headers) }
 function Set-CopilotMqttNewSessionEntityIds { $false }
 function Set-CopilotMqttNewSessionResult {
     param([string]$Text = '', [hashtable]$Headers)
     $script:Results += $Text
 }
 function Start-BridgeCopilotSession {
-    param([string]$WorkingDirectory, [string]$Prompt = '', [string]$SessionId = '', [string]$AgencyProfile = '')
-    $script:Launches += [pscustomobject]@{ Directory = $WorkingDirectory; Prompt = $Prompt; AgencyProfile = $AgencyProfile }
-    [pscustomobject]@{ Launched = $true; SessionId = '11111111-2222-3333-4444-555555555555'; ProcessId = 4242; Launcher = 'agency'; Detail = 'started pid 4242' }
+    param([string]$WorkingDirectory, [string]$Prompt = '', [string]$SessionId = '', [string]$AgencyProfile = '', [switch]$Resume)
+    $script:Launches += [pscustomobject]@{
+        Directory = $WorkingDirectory; Prompt = $Prompt; AgencyProfile = $AgencyProfile
+        SessionId = $SessionId; Resumed = $Resume.IsPresent
+    }
+    $id = if ($SessionId) { $SessionId } else { '11111111-2222-3333-4444-555555555555' }
+    [pscustomobject]@{ Launched = $true; SessionId = $id; ProcessId = 4242; Launcher = 'agency'; Detail = 'started pid 4242' }
 }
 function Wait-BridgeSessionRegistered { param([string]$SessionId, [int]$TimeoutSeconds = 25) $true }
 function Invoke-HomeAssistantService {
@@ -342,7 +435,13 @@ function Invoke-HomeAssistantService {
 }
 
 function Reset-NewSessionTest {
-    param([string]$Press, [string]$Workspace = 'alpha', [string]$Prompt = 'do the thing', [string]$ProfileState = 'work')
+    param(
+        [string]$Press,
+        [string]$Workspace = 'alpha',
+        [string]$Prompt = 'do the thing',
+        [string]$ProfileState = 'work',
+        [string]$ResumeState = 'New session'
+    )
     $script:Launches = @()
     $script:Results = @()
     $script:Cleared = @()
@@ -354,9 +453,16 @@ function Reset-NewSessionTest {
         'button.copilot_cli_new_session'   = $Press
         'select.copilot_cli_new_workspace' = $Workspace
         'select.copilot_cli_new_profile'   = $ProfileState
+        'select.copilot_cli_new_resume'    = $ResumeState
         'text.copilot_cli_new_prompt'      = $Prompt
     }
 }
+
+# No resumable sessions unless a test asks for them, and an empty live set.
+$script:AgencyJson = ''
+$noLive = @{}
+function Reset-ResumeCache { $script:DaemonResumeCache = @(); $script:DaemonResumeCacheAt = [DateTimeOffset]::MinValue }
+Reset-ResumeCache
 
 # Agency is the launcher for these, so the profile path is exercised.
 $script:AgencyPresent = $true
@@ -367,7 +473,7 @@ $script:FakeSettings = @{
 }
 
 Reset-NewSessionTest -Press '2026-06-01T12:00:00+00:00'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'a fresh press launches a session' { $script:Launches.Count -eq 1 }
 Test-That 'it launches in the selected workspace' { $script:Launches[0].Directory -eq $alpha }
 Test-That 'it passes the typed prompt' { $script:Launches[0].Prompt -eq 'do the thing' }
@@ -376,47 +482,119 @@ Test-That 'it reports the result' { ($script:Results -join ' ') -match 'Started'
 Test-That 'the result names the profile' { ($script:Results -join ' ') -match 'work' }
 Test-That 'it clears the prompt box afterwards' { $script:Cleared -contains 'text.set_value' }
 
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'the same press does not launch twice' { $script:Launches.Count -eq 1 }
 
 Reset-NewSessionTest -Press '2025-01-01T00:00:00+00:00'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'a press from before the daemon started is ignored' { $script:Launches.Count -eq 0 }
 
 Reset-NewSessionTest -Press 'unknown'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'an unknown button state is ignored' { $script:Launches.Count -eq 0 }
 
 Reset-NewSessionTest -Press '2026-06-01T12:05:00+00:00' -Workspace 'somewhere-else'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'an unapproved workspace refuses to launch' { $script:Launches.Count -eq 0 }
 Test-That 'and says why' { ($script:Results -join ' ') -match 'Unknown workspace' }
 
 Reset-NewSessionTest -Press '2026-06-01T12:06:00+00:00' -Workspace 'unknown'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'an untouched selector falls back to the first workspace' {
     $script:Launches.Count -eq 1 -and $script:Launches[0].Directory -eq $alpha
 }
 
 Reset-NewSessionTest -Press '2026-06-01T12:07:00+00:00' -Prompt 'unknown'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'an untouched prompt box launches with no prompt' {
     $script:Launches.Count -eq 1 -and $script:Launches[0].Prompt -eq ''
 }
-Test-That 'and nothing needs clearing' { $script:Cleared.Count -eq 0 }
+# An untouched box reads `unknown`, which renders as "(empty value)". Priming it to
+# blank is the point of the defaults pass, so one write here is correct - what must
+# not happen is the post-launch clear running as well for a prompt that was empty.
+Test-That 'an untouched prompt box is primed blank rather than left unknown' {
+    $script:Cleared -contains 'text.set_value'
+}
+Test-That 'and it is written exactly once, not primed and then cleared again' {
+    @($script:Cleared | Where-Object { $_ -eq 'text.set_value' }).Count -eq 1
+}
 
 Reset-NewSessionTest -Press '2026-06-01T12:10:00+00:00' -ProfileState 'home'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'a different profile is honoured' { $script:Launches[0].AgencyProfile -eq 'home' }
 
+Write-Host ''
+Write-Host '--- resuming a previous session ---'
+
+# A resumable session whose folder really exists, so the resume path can assert on
+# the working directory it chooses.
+Set-AgencySessions -Sessions @(
+    @{ session_id = 'f0f0f0f0-1111-2222-3333-444444444444'; summary = 'Earlier work'; folder = $beta; can_resume = $true; updated_at = '2026-09-23T10:00:00Z' }
+)
+$resumeLabel = 'Earlier work - beta'
+
+Reset-NewSessionTest -Press '2026-06-01T12:20:00+00:00' -ResumeState $resumeLabel
+Reset-ResumeCache
+$script:DaemonNewSessionSignature = ''
+Sync-DaemonNewSession -Headers $headers -Live $noLive
+Test-That 'a resume selection launches that session id' {
+    $script:Launches.Count -eq 1 -and $script:Launches[0].SessionId -eq 'f0f0f0f0-1111-2222-3333-444444444444'
+}
+Test-That 'it is flagged as a resume' { $script:Launches[0].Resumed }
+Test-That 'it uses the session own folder, not the workspace' { $script:Launches[0].Directory -eq $beta }
+Test-That 'the profile still applies to a resume' { $script:Launches[0].AgencyProfile -eq 'work' }
+Test-That 'the result says it resumed' { ($script:Results -join ' ') -match 'Resum' }
+
+Reset-NewSessionTest -Press '2026-06-01T12:21:00+00:00' -ResumeState 'New session'
+Reset-ResumeCache
+$script:DaemonNewSessionSignature = ''
+Sync-DaemonNewSession -Headers $headers -Live $noLive
+Test-That 'the New session option starts a fresh session' {
+    $script:Launches.Count -eq 1 -and -not $script:Launches[0].Resumed -and $script:Launches[0].SessionId -eq ''
+}
+Test-That 'and uses the selected workspace' { $script:Launches[0].Directory -eq $alpha }
+
+Reset-NewSessionTest -Press '2026-06-01T12:22:00+00:00' -ResumeState 'Something that vanished - old'
+Reset-ResumeCache
+$script:DaemonNewSessionSignature = ''
+Sync-DaemonNewSession -Headers $headers -Live $noLive
+Test-That 'a stale resume selection refuses to launch' { $script:Launches.Count -eq 0 }
+Test-That 'and says so' { ($script:Results -join ' ') -match 'no longer resumable' }
+
+# A live session must never be offered for resume: two CLIs on one transcript.
+Reset-ResumeCache
+$live = @{ 'f0f0f0f0-1111-2222-3333-444444444444' = $true }
+Test-That 'a live session is kept out of the resume list' {
+    @(Get-DaemonResumableSessions -LiveSessionIds @($live.Keys)).Count -eq 0
+}
+
+# The Agency query is expensive, so it must be cached between reconciles.
+Reset-ResumeCache
+$script:AgencyJsonCalls = 0
+function Get-BridgeAgencySessionJson { $script:AgencyJsonCalls++; $script:AgencyJson }
+$null = Get-DaemonResumableSessions -LiveSessionIds @()
+$null = Get-DaemonResumableSessions -LiveSessionIds @()
+$null = Get-DaemonResumableSessions -LiveSessionIds @()
+Test-That 'the session list is fetched once within the cache window' { $script:AgencyJsonCalls -eq 1 }
+$script:DaemonResumeCacheAt = [DateTimeOffset]::Now.AddSeconds(-9999)
+$null = Get-DaemonResumableSessions -LiveSessionIds @()
+Test-That 'an expired cache refetches' { $script:AgencyJsonCalls -eq 2 }
+$null = Get-DaemonResumableSessions -LiveSessionIds @() -Force
+Test-That 'a forced refresh refetches' { $script:AgencyJsonCalls -eq 3 }
+
+Write-Host ''
+Write-Host '--- press handling, continued ---'
+$script:AgencyJson = ''
+Reset-ResumeCache
+
 Reset-NewSessionTest -Press '2026-06-01T12:11:00+00:00' -ProfileState 'unknown'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'an untouched profile selector falls back to the first profile' {
     $script:Launches.Count -eq 1 -and $script:Launches[0].AgencyProfile -eq 'work'
 }
 
 Reset-NewSessionTest -Press '2026-06-01T12:12:00+00:00' -ProfileState 'prod --yolo'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'an unapproved profile refuses to launch' { $script:Launches.Count -eq 0 }
 Test-That 'and says which profile' { ($script:Results -join ' ') -match 'Unknown profile' }
 
@@ -428,7 +606,7 @@ $script:FakeSettings = @{
 }
 Reset-NewSessionTest -Press '2026-06-01T12:13:00+00:00' -ProfileState 'home'
 $script:DaemonNewSessionSignature = ''
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'the copilot launcher ignores the profile entirely' {
     $script:Launches.Count -eq 1 -and $script:Launches[0].AgencyProfile -eq ''
 }
@@ -442,13 +620,13 @@ $script:FakeSettings = @{
 Reset-NewSessionTest -Press '2026-06-01T12:08:00+00:00'
 $script:FakeSettings = @{ 'newSession.workspaces' = @() }
 $script:DaemonNewSessionSignature = ''
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'no configured workspaces refuses to launch' { $script:Launches.Count -eq 0 }
 Test-That 'and explains what to configure' { ($script:Results -join ' ') -match 'No workspaces configured' }
 
 $script:FakeSettings = @{ 'newSession.enabled' = $false; 'newSession.workspaces' = @($alpha) }
 Reset-NewSessionTest -Press '2026-06-01T12:09:00+00:00'
-Sync-DaemonNewSession -Headers $headers
+Sync-DaemonNewSession -Headers $headers -Live $noLive
 Test-That 'the whole feature can be turned off' { $script:Launches.Count -eq 0 -and $script:Results.Count -eq 0 }
 
 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
@@ -460,3 +638,4 @@ if ($script:Failures) {
     exit 1
 }
 Write-Host 'All checks passed' -ForegroundColor Green
+

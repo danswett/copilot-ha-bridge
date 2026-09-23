@@ -19,6 +19,9 @@
     "enabled": true,
     "launcher": "auto",
     "profiles": ["work", "home", "local"],
+    "defaultProfile": "work",
+    "defaultWorkspace": "Bridge",
+    "resumeCount": 12,
     "workspaces": [
       { "label": "Bridge", "path": "~/repos/copilot-ha-bridge" },
       "~/repos"

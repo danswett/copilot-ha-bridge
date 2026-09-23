@@ -155,6 +155,27 @@ function Resolve-BridgeWorkspacePath {
     $match.Path
 }
 
+function Get-BridgeDefaultWorkspaceLabel {
+    <#
+        The workspace a launch uses when nothing has been chosen.
+
+        Launching should take one button press, so both selectors need a real default
+        rather than sitting at `unknown` and forcing a decision. `newSession.
+        defaultWorkspace` names it; anything unset, or naming a workspace that is no
+        longer on the list, falls back to the first entry so the button always works.
+    #>
+    $choices = @(Get-BridgeWorkspaceChoices)
+    if ($choices.Count -eq 0) { return '' }
+
+    $configured = [string](Get-BridgeSetting 'newSession.defaultWorkspace' '')
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        $match = $choices | Where-Object { $_.Label -eq $configured } | Select-Object -First 1
+        if ($null -ne $match) { return [string]$match.Label }
+    }
+
+    [string]$choices[0].Label
+}
+
 function Get-BridgeCopilotPath {
     <#
         Locates copilot.exe. An explicit `newSession.copilotPath` wins; otherwise the
@@ -251,6 +272,25 @@ function Resolve-BridgeAgencyProfile {
     $match
 }
 
+function Get-BridgeDefaultAgencyProfile {
+    <#
+        The Agency profile a launch uses when nothing has been chosen, from
+        `newSession.defaultProfile`. Falls back to the first configured profile for
+        the same reason the workspace does: pressing Launch must never require a
+        preceding selection.
+    #>
+    $profiles = @(Get-BridgeAgencyProfiles)
+    if ($profiles.Count -eq 0) { return '' }
+
+    $configured = [string](Get-BridgeSetting 'newSession.defaultProfile' '')
+    if (-not [string]::IsNullOrWhiteSpace($configured)) {
+        $match = $profiles | Where-Object { $_ -eq $configured } | Select-Object -First 1
+        if (-not [string]::IsNullOrWhiteSpace($match)) { return [string]$match }
+    }
+
+    [string]$profiles[0]
+}
+
 function Get-BridgeNewSessionArguments {
     <#
         The argument list for a new session, kept separate from the launch itself so
@@ -309,6 +349,128 @@ function Get-BridgeNewSessionArguments {
     @(@('--session-id', $SessionId) + $copilotArguments)
 }
 
+function Get-BridgeAgencySessionJson {
+    <#
+        The raw JSON from `agency hub list-local-sessions --json`.
+
+        Split out from the parsing so the parsing can be tested without Agency
+        installed, and so the one slow, machine-dependent step sits behind a single
+        seam.
+
+        Agency prints a version banner and a log path before the payload, so the
+        caller gets everything from the first brace onward; anything without a brace
+        is treated as no data rather than parsed and thrown from.
+    #>
+    $agency = Get-BridgeAgencyPath
+    if ([string]::IsNullOrWhiteSpace($agency)) { return '' }
+
+    try {
+        $raw = & $agency hub list-local-sessions --json 2>$null | Out-String
+    }
+    catch {
+        return ''
+    }
+
+    if ([string]::IsNullOrWhiteSpace($raw)) { return '' }
+    $start = $raw.IndexOf('{')
+    if ($start -lt 0) { return '' }
+    $raw.Substring($start)
+}
+
+function Get-BridgeResumableSessions {
+    <#
+        Recent sessions that can be resumed, newest first.
+
+        Agency is the only thing that knows this: it aggregates sessions from the CLI,
+        the desktop app and VS Code, and marks which are actually resumable. On a
+        working machine that call returns about half a megabyte describing 700+
+        sessions and takes over a second, so it is never run on a reconcile - the
+        daemon caches the result and only refreshes it on a timer.
+
+        `can_resume` is the filter that matters: desktop-app and VS Code sessions all
+        report false, and resuming one in a terminal is not a thing. Sessions that are
+        currently live are excluded separately by the caller, because attaching a
+        second process to a running session would mean two CLIs writing one transcript.
+    #>
+    param(
+        [int]$Limit = 0,
+
+        # Session ids to leave out - the live ones.
+        [AllowEmptyCollection()]
+        [string[]]$Exclude = @()
+    )
+
+    if ($Limit -le 0) { $Limit = [int](Get-BridgeSetting 'newSession.resumeCount' 12) }
+    if ($Limit -le 0) { return @() }
+
+    $json = Get-BridgeAgencySessionJson
+    if ([string]::IsNullOrWhiteSpace($json)) { return @() }
+
+    try { $parsed = $json | ConvertFrom-Json }
+    catch { return @() }
+
+    if ($null -eq $parsed -or -not $parsed.PSObject.Properties['sessions']) { return @() }
+
+    $excluded = @{}
+    foreach ($id in @($Exclude)) {
+        if (-not [string]::IsNullOrWhiteSpace($id)) { $excluded[[string]$id] = $true }
+    }
+
+    $candidates = foreach ($session in @($parsed.sessions)) {
+        if (-not $session.can_resume) { continue }
+        $id = [string]$session.session_id
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        if ($excluded.ContainsKey($id)) { continue }
+
+        $updated = [DateTimeOffset]::MinValue
+        if ($session.PSObject.Properties['updated_at']) {
+            [void][DateTimeOffset]::TryParse([string]$session.updated_at, [ref]$updated)
+        }
+
+        [pscustomobject]@{
+            SessionId = $id
+            Summary   = if ($session.PSObject.Properties['summary']) { [string]$session.summary } else { '' }
+            Folder    = if ($session.PSObject.Properties['folder']) { [string]$session.folder } else { '' }
+            Updated   = $updated
+        }
+    }
+
+    $recent = @($candidates) | Sort-Object Updated -Descending | Select-Object -First $Limit
+
+    # Build display labels. Home Assistant needs every option in a select to be
+    # unique, and a duplicate would make two different sessions indistinguishable, so
+    # a repeated label gets its session-id prefix appended.
+    $seen = @{}
+    $results = foreach ($entry in @($recent)) {
+        $short = $entry.SessionId.Substring(0, [Math]::Min(8, $entry.SessionId.Length))
+        $summary = ($entry.Summary -replace '\s+', ' ').Trim()
+        if ([string]::IsNullOrWhiteSpace($summary)) { $summary = "Session $short" }
+
+        $folderLeaf = ''
+        if (-not [string]::IsNullOrWhiteSpace($entry.Folder)) {
+            $folderLeaf = [System.IO.Path]::GetFileName($entry.Folder.TrimEnd('\', '/'))
+        }
+
+        $label = if ($folderLeaf) { "$summary - $folderLeaf" } else { $summary }
+        # An option has to match the entity state exactly, and Home Assistant caps a
+        # state at 255 characters, so a long summary is trimmed here rather than
+        # arriving truncated and never matching.
+        if ($label.Length -gt 120) { $label = $label.Substring(0, 117) + '...' }
+        if ($seen.ContainsKey($label)) { $label = "$label ($short)" }
+        if ($seen.ContainsKey($label)) { continue }
+        $seen[$label] = $true
+
+        [pscustomobject]@{
+            Label     = $label
+            SessionId = $entry.SessionId
+            Folder    = $entry.Folder
+            Updated   = $entry.Updated
+        }
+    }
+
+    @($results)
+}
+
 function Start-BridgeCopilotSession {
     <#
         Starts a new Copilot CLI session in its own visible console window, through
@@ -325,7 +487,12 @@ function Start-BridgeCopilotSession {
         [Parameter(Mandatory)][string]$WorkingDirectory,
         [string]$Prompt = '',
         [string]$SessionId = '',
-        [string]$AgencyProfile = ''
+        [string]$AgencyProfile = '',
+
+        # Resuming an existing session rather than creating one. The command line is
+        # identical - the CLI resumes whenever --session-id names a session that
+        # already exists - so this only affects what gets reported.
+        [switch]$Resume
     )
 
     $result = [pscustomobject]@{
@@ -383,7 +550,8 @@ function Start-BridgeCopilotSession {
 
         $result.ProcessId = $process.Id
         $result.Launched = $true
-        $detail = "started pid $($process.Id) in $WorkingDirectory via $launcher"
+        $verb = if ($Resume.IsPresent) { 'resumed' } else { 'started' }
+        $detail = "$verb pid $($process.Id) in $WorkingDirectory via $launcher"
         if ($launcher -eq 'agency' -and $AgencyProfile) { $detail += " (profile $AgencyProfile)" }
         $result.Detail = $detail
     }
@@ -396,13 +564,18 @@ function Start-BridgeCopilotSession {
 
 function Wait-BridgeSessionRegistered {
     <#
-        Waits for the CLI to register the session it was told to create.
+        Waits for the CLI to register the session it was told to create or resume.
 
         The session directory and its `inuse.<pid>.lock` are what the daemon
         discovers sessions from, so their appearance is the real confirmation that
         the launch worked - a process id alone only proves something started, not
         that it got far enough to be a session. Used to report an honest result on
         the dashboard rather than an optimistic one.
+
+        The lock's pid has to be checked against the live process list rather than
+        taken at face value. A resumed session's directory usually still holds the
+        lock from the run that created it, so simply looking for the file would
+        report instant success for a resume that in fact never started.
     #>
     param(
         [Parameter(Mandatory)][string]$SessionId,
@@ -414,8 +587,15 @@ function Wait-BridgeSessionRegistered {
 
     while ([DateTimeOffset]::Now -lt $deadline) {
         if ([System.IO.Directory]::Exists($directory)) {
+            $livePids = @{}
+            foreach ($process in @(Get-Process -Name 'copilot' -ErrorAction SilentlyContinue)) {
+                $livePids[$process.Id] = $true
+            }
+
             foreach ($lock in [System.IO.Directory]::EnumerateFiles($directory, 'inuse.*.lock')) {
-                return $true
+                $name = [System.IO.Path]::GetFileName($lock)
+                if ($name -notmatch '^inuse\.(\d+)\.lock$') { continue }
+                if ($livePids.ContainsKey([int]$Matches[1])) { return $true }
             }
         }
         Start-Sleep -Milliseconds 500

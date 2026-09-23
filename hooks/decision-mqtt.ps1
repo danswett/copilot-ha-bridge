@@ -34,6 +34,10 @@ $script:CopilotMqttConfig = @{
     ReplyMaxChars = 255
 }
 
+# The resume selector's "start fresh" option. Shared because the daemon compares the
+# selector's state against it and the dashboard shows it as the default.
+$script:CopilotMqttNewSessionOption = 'New session'
+
 function Get-CopilotMqttNodeId {
     <#
         A stable, MQTT-safe node id for a session. Discovery topics and object ids
@@ -452,6 +456,9 @@ function Publish-CopilotMqttNewSession {
         [AllowEmptyCollection()]
         [string[]]$Profiles = @(),
 
+        [AllowEmptyCollection()]
+        [object[]]$Resumable = @(),
+
         [string]$LastResult = '',
 
         [Parameter(Mandatory)]
@@ -518,6 +525,26 @@ function Publish-CopilotMqttNewSession {
     }
     Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_profile/config" `
         -Payload ($profileConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
+    # Resume selector. "New session" is always the first option and the default, so
+    # the common case needs no interaction and nothing can be resumed by accident.
+    $resumeOptions = @($script:CopilotMqttNewSessionOption)
+    foreach ($entry in @($Resumable)) {
+        $label = [string]$entry.Label
+        if (-not [string]::IsNullOrWhiteSpace($label)) { $resumeOptions += $label }
+    }
+
+    $resumeConfig = @{
+        name          = 'New session resume'
+        unique_id     = 'copilot_cli_new_resume'
+        object_id     = 'copilot_cli_new_resume'
+        command_topic = "$root/newsession/resume/set"
+        options       = $resumeOptions
+        icon          = 'mdi:history'
+        device        = $device
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_resume/config" `
+        -Payload ($resumeConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     $buttonConfig = @{
         name          = 'Start new session'

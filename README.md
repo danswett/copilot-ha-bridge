@@ -191,7 +191,10 @@ never in the repo). See [`config.example.json`](config.example.json).
 | `newSession.enabled` | Set to `false` to hide the "Start a new session" controls (default `true`) |
 | `newSession.launcher` | `auto` (default: Agency when installed), `agency`, or `copilot` |
 | `newSession.profiles` | Agency profiles offered on the dashboard (default `["work","home","local"]`) |
+| `newSession.defaultProfile` | Profile preselected on the card (default: the first in `profiles`) |
+| `newSession.defaultWorkspace` | Workspace label preselected on the card (default: the first in `workspaces`) |
 | `newSession.workspaces` | Directories offered as launch targets — a path string, or `{ "label": …, "path": … }` |
+| `newSession.resumeCount` | How many recent sessions the Resume dropdown offers (default `12`) |
 | `newSession.model` | Model for launched sessions (default: whatever the CLI would pick) |
 | `newSession.allowAllTools` | Add `--allow-all-tools` to launched sessions (default `false`) |
 | `newSession.extraArgs` | Extra CLI arguments for launched sessions, e.g. `["--plan"]` |
@@ -239,13 +242,36 @@ dashboard view.
 ## Starting a session from the dashboard
 
 Everything else in the bridge attaches to sessions you already started at a keyboard.
-The **Start a new session** card opens one: pick a workspace, optionally a profile and
-an opening prompt, and press **Launch**.
+The **Start a new session** card opens one — or reopens an old one.
 
-A new CLI session opens in its own console window on the desktop, which the daemon then
-adopts like any other — it gets the usual card, activity stream, reply box and decision
+Both selectors carry a default, so the whole thing is one button press: open the card,
+press **Launch**. Nothing has to be filled in first.
+
+| Row | What it does |
+|---|---|
+| **Resume** | `New session` (the default), or one of your recent resumable sessions |
+| **Workspace** | Where a new session starts. Ignored for a resume, which reopens in its own folder |
+| **Profile** | The Agency profile, applied to new and resumed sessions alike |
+| **Launch** | Starts it |
+| **Last launch** | What the previous press actually did |
+| **Opening prompt** | Optional. A first instruction, if you want one |
+
+A session opens in its own console window on the desktop, which the daemon then adopts
+like any other — it gets the usual card, activity stream, reply box and decision
 prompts. Because the window is real and visible, you can also walk over and take the
 session over at the keyboard.
+
+### Resuming
+
+The list comes from `agency hub list-local-sessions`, which is the only thing that
+knows about every session on the machine and which of them can actually be resumed —
+desktop-app and VS Code sessions cannot. That call reads hundreds of sessions and takes
+over a second, so the daemon caches it (`newSession.resumeCount` controls how many are
+offered) and refreshes it on a timer rather than on every reconcile.
+
+Sessions that are currently live are never offered, because two CLIs writing one
+transcript would corrupt it. A resume reopens in the folder the session originally ran
+in; the Workspace row only applies to a new session.
 
 ### Agency
 
@@ -258,7 +284,8 @@ every server on the machine.
 
 Because the same directory is routinely opened under different profiles, the profile is
 its own dropdown rather than a property of the workspace. Set `newSession.launcher` to
-`copilot` to bypass Agency entirely; the profile row then disappears from the card.
+`copilot` to bypass Agency entirely; the profile and resume rows then disappear from
+the card.
 
 Agency takes `--session-id` itself and uses that UUID for both its own session and the
 underlying Copilot one, so the daemon still knows the session id before the process
