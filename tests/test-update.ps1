@@ -30,6 +30,13 @@ function Test-That {
     }
 }
 
+# The real GitHub API is rate-limited on shared CI runners, where an unauthenticated
+# 403 is indistinguishable from an outage. That made the refetch and failure tests
+# non-deterministic. Simulate every fetch as an outage: the cache, version and
+# failure-handling logic under test needs no real response, and this keeps the suite
+# offline and stable.
+function Invoke-RestMethod { throw 'network disabled in test' }
+
 Write-Host '--- version comparison ---'
 $cases = @(
     @{ Installed = '1.0.0'; Latest = 'v1.0.1'; Newer = $true }
@@ -90,7 +97,7 @@ try {
     $refreshed = Get-BridgeLatestRelease
     Test-That 'an expired cache is refetched (network)' {
         $null -eq $refreshed -or $refreshed.Tag -ne 'v9.9.9'
-    } (($refreshed.Tag) ?? 'null')
+    } $(if ($null -ne $refreshed) { $refreshed.Tag } else { 'null' })
 
     Write-Host '--- failure is survivable ---'
     Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
