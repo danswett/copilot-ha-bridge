@@ -205,7 +205,9 @@ dashboard view.
 The daemon asks GitHub for the newest release once a day and publishes the result as
 a Home Assistant **update entity**, so a new version shows up on the dashboard and in
 Home Assistant's own Updates list — with the release notes and a one-press **Install
-now** button.
+now** button. Pressing it shows a spinner while the install runs and leaves a
+notification when it finishes — *Bridge updated to X*, or the error if it failed —
+then restarts the daemon so the new version is actually running.
 
 From a terminal:
 
@@ -246,6 +248,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-security.ps1         # template injection, path and topic safety, token handling
 .\tests\test-reliability.ps1      # request budget, StrictMode safety, stale-state pruning
 .\tests\test-update.ps1           # version comparison, release cache, failure safety
+.\tests\test-update-outcome.ps1   # install spinner + updated/failed notification
 .\tests\test-verbose-toggle.ps1   # Live Verbose helper is provisioned without ever resetting it
 ```
 

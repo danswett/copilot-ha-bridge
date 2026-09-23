@@ -44,6 +44,10 @@ $script:DaemonConfig = @{
     VerboseToggle = 'input_boolean.copilot_cli_live_verbose'
     LogFile = (Join-Path $env:TEMP 'copilot-bridge-daemon.log')
     StateFile = (Join-Path $env:TEMP 'copilot-bridge-daemon-state.json')
+    # Written by the self-updater when an install finishes, read by whichever daemon
+    # is running next, so a press of the install button ends in a visible
+    # "updated to X" (or a failure) notification.
+    UpdateOutcomeFile = (Join-Path $env:TEMP 'copilot-bridge-update-outcome.json')
     # Cap how much transcript is read in one pass, so a session that produced a huge
     # burst cannot stall the loop.
     MaxTailBytes = 512000
@@ -1035,6 +1039,76 @@ function Clear-CopilotMqttOrphans {
     }
 }
 
+function Invoke-DaemonUpdateOutcome {
+    <#
+        Announces the result of a self-update.
+
+        The updater runs detached, with none of the bridge's modules or Home Assistant
+        config loaded, so it cannot publish cleanly itself. It drops a small outcome
+        file instead, and whichever daemon runs next turns that into a visible
+        notification and an authoritative update-entity state. Reading it every
+        reconcile - not only at startup - means the announcement fires whether the
+        daemon was restarted by a successful update or kept running through a failed
+        one.
+    #>
+    param([Parameter(Mandatory)][hashtable]$Headers)
+
+    $path = $script:DaemonConfig.UpdateOutcomeFile
+    if (-not (Test-Path -LiteralPath $path)) { return }
+
+    $outcome = $null
+    try { $outcome = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $outcome = $null }
+    # A malformed or unreadable marker must not wedge the daemon: drop it and move on.
+    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $outcome) { return }
+
+    # Ignore a marker from long ago - a machine that was off for a week should not pop
+    # a surprise notification when it wakes.
+    try {
+        if ($outcome.PSObject.Properties.Name -contains 'at' -and $outcome.at) {
+            if (([DateTimeOffset]::Now - [DateTimeOffset]::Parse([string]$outcome.at)).TotalHours -gt 6) { return }
+        }
+    }
+    catch { }
+
+    $success = ($outcome.PSObject.Properties.Name -contains 'success' -and $outcome.success)
+    $version = if ($outcome.PSObject.Properties.Name -contains 'version') { [string]$outcome.version } else { '' }
+    $url = if ($outcome.PSObject.Properties.Name -contains 'releaseUrl') { [string]$outcome.releaseUrl } else { '' }
+
+    try {
+        if ($success) {
+            # Authoritative "up to date" using the version actually installed, so the
+            # entity is correct even on a daemon whose cached config is still stale.
+            Publish-CopilotMqttUpdate -InstalledVersion $version -LatestVersion $version `
+                -ReleaseUrl $url -Headers $Headers
+            [void](Set-CopilotMqttUpdateEntityIds)
+            $script:DaemonUpdateAvailable = $false
+            $script:DaemonUpdatePublished = $true
+            $message = "The Home Assistant bridge updated to **$version**."
+            if ($url) { $message += " [Release notes]($url)" }
+            Invoke-HomeAssistantService -Domain 'persistent_notification' -Service 'create' `
+                -Data @{ title = 'Bridge updated'; message = $message; notification_id = 'copilot_bridge_update' } `
+                -Headers $Headers
+            Write-DaemonLog -Message "self-update announced: updated to $version"
+        }
+        else {
+            $err = if ($outcome.PSObject.Properties.Name -contains 'error') { [string]$outcome.error } else { 'unknown error' }
+            # Clear the spinner, but leave the update showing as available so it can be
+            # retried.
+            $installed = (Get-BridgeUpdateStatus).Installed
+            $latest = if ($version) { $version } else { $installed }
+            Publish-CopilotMqttUpdate -InstalledVersion $installed -LatestVersion $latest -Headers $Headers
+            Invoke-HomeAssistantService -Domain 'persistent_notification' -Service 'create' `
+                -Data @{ title = 'Bridge update failed'; message = "The bridge update did not complete: $err"; notification_id = 'copilot_bridge_update' } `
+                -Headers $Headers
+            Write-DaemonLog -Message "self-update announced: FAILED ($err)"
+        }
+    }
+    catch {
+        Write-DaemonLog -Message "update outcome announce failed: $($_.Exception.Message)"
+    }
+}
+
 function Sync-DaemonUpdateStatus {
     <#
         Publishes the bridge's own update status, and acts on a press of the install
@@ -1046,6 +1120,10 @@ function Sync-DaemonUpdateStatus {
         reconcile costs nothing.
     #>
     param([Parameter(Mandatory)][hashtable]$Headers)
+
+    # A pending self-update result is announced regardless of the daily-check opt-out:
+    # it is the response to the user pressing install, not a background poll.
+    Invoke-DaemonUpdateOutcome -Headers $Headers
 
     # Opting out has to stop the network call, not just hide the result, so this is
     # checked before anything else happens.
@@ -1090,6 +1168,15 @@ function Sync-DaemonUpdateStatus {
         if ($pressedAt -le $script:DaemonStartedAt) { return }
 
         Write-DaemonLog -Message 'install update requested from Home Assistant'
+        # Spinner up front. The retained in_progress=true outlives the daemon that the
+        # updater is about to restart, and the next daemon clears it.
+        try {
+            Publish-CopilotMqttUpdate -InstalledVersion $status.Installed -LatestVersion $latest `
+                -ReleaseUrl $status.Url -ReleaseNotes $status.Notes -InProgress -Headers $Headers
+        }
+        catch {
+            Write-DaemonLog -Message "could not show update spinner: $($_.Exception.Message)"
+        }
         $result = Invoke-BridgeSelfUpdate -Detached
         Write-DaemonLog -Message "self-update: $($result.Detail)"
     }
@@ -1788,21 +1875,26 @@ function Start-BridgeDaemon {
 }
 
 # A second daemon would publish duplicate activity and race on reply delivery.
-$mutex = [Threading.Mutex]::new($false, $script:DaemonConfig.MutexName)
-$owned = $false
-try {
-    $owned = $mutex.WaitOne([TimeSpan]::FromSeconds(2))
-    if (-not $owned) {
-        Write-DaemonLog -Message 'another daemon instance is already running; exiting'
-        return
+# Tests dot-source this file with COPILOT_BRIDGE_DAEMON_NORUN set to load the
+# functions without starting the daemon; the supervisor never sets it, so a real
+# launch is unaffected.
+if (-not $env:COPILOT_BRIDGE_DAEMON_NORUN) {
+    $mutex = [Threading.Mutex]::new($false, $script:DaemonConfig.MutexName)
+    $owned = $false
+    try {
+        $owned = $mutex.WaitOne([TimeSpan]::FromSeconds(2))
+        if (-not $owned) {
+            Write-DaemonLog -Message 'another daemon instance is already running; exiting'
+            return
+        }
+        Start-BridgeDaemon
     }
-    Start-BridgeDaemon
-}
-catch {
-    Write-DaemonLog -Message "daemon crashed: $($_.Exception.Message)"
-    throw
-}
-finally {
-    if ($owned) { $mutex.ReleaseMutex() }
-    $mutex.Dispose()
+    catch {
+        Write-DaemonLog -Message "daemon crashed: $($_.Exception.Message)"
+        throw
+    }
+    finally {
+        if ($owned) { $mutex.ReleaseMutex() }
+        $mutex.Dispose()
+    }
 }

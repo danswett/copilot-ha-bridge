@@ -185,6 +185,7 @@ function Invoke-BridgeSelfUpdate {
 `$ErrorActionPreference = 'Stop'
 `$staging = '$staging'
 `$log = Join-Path `$env:TEMP 'copilot-bridge-update.log'
+`$outcomeFile = Join-Path `$env:TEMP 'copilot-bridge-update-outcome.json'
 function Write-UpdateLog { param([string]`$Message) Add-Content -LiteralPath `$log -Value ("{0} {1}" -f [DateTimeOffset]::Now.ToString('o'), `$Message) }
 
 try {
@@ -200,9 +201,20 @@ try {
     # settings are passed here.
     & (Join-Path `$root.FullName 'install.ps1') -NonInteractive -SkipVerify$targetArgument
     Write-UpdateLog 'update complete'
+    @{ success = `$true; version = '$($status.Latest)'; releaseUrl = '$($status.Url)'; at = [DateTimeOffset]::Now.ToString('o') } |
+        ConvertTo-Json -Compress | Set-Content -LiteralPath `$outcomeFile -Encoding UTF8
+    # Restart the daemon so the new code and config take effect. The installer cannot:
+    # the running daemon is detached and survives the scheduled-task restart. Killing it
+    # makes the supervisor relaunch a fresh one, which reads the marker above and
+    # announces the result.
+    Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { `$_.CommandLine -match 'copilot-bridge-daemon\.ps1' } |
+        ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 catch {
     Write-UpdateLog "update FAILED: `$(`$_.Exception.Message)"
+    @{ success = `$false; error = `$_.Exception.Message; at = [DateTimeOffset]::Now.ToString('o') } |
+        ConvertTo-Json -Compress | Set-Content -LiteralPath `$outcomeFile -Encoding UTF8
 }
 finally {
     Remove-Item -LiteralPath `$staging -Recurse -Force -ErrorAction SilentlyContinue

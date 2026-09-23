@@ -359,6 +359,7 @@ function Publish-CopilotMqttUpdate {
         [Parameter(Mandatory)][string]$LatestVersion,
         [string]$ReleaseUrl = '',
         [string]$ReleaseNotes = '',
+        [switch]$InProgress,
         [Parameter(Mandatory)][hashtable]$Headers
     )
 
@@ -391,6 +392,10 @@ function Publish-CopilotMqttUpdate {
         installed_version = $InstalledVersion
         latest_version    = $LatestVersion
         title             = 'Copilot CLI Home Assistant bridge'
+        # Always present, so Home Assistant shows a spinner while an install runs and
+        # clears it the moment a later publish reports false, rather than inferring
+        # the flag from an absent key.
+        in_progress       = [bool]$InProgress
     }
     if ($ReleaseUrl) { $state['release_url'] = $ReleaseUrl }
     if ($notes) { $state['release_summary'] = $notes }
