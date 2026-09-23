@@ -20,7 +20,11 @@
     because publishing a new session resolves its entity ids over the WebSocket.
 #>
 
-Set-StrictMode -Version Latest
+# Deliberately no top-level Set-StrictMode: this library is dot-sourced into hook
+# scripts, and Set-StrictMode leaks into the dot-sourcing scope. The Copilot hooks
+# (route-ask-user-v3, notify-agent-response) are not written under StrictMode, so
+# forcing it on them changes their behaviour. The functions below are strict-safe
+# regardless, and the test suite dot-sources them under StrictMode to keep them so.
 
 function Enter-BridgeAdapterSession {
     <#
@@ -142,20 +146,24 @@ function Send-BridgeResponseNotification {
     <#
         Pushes the out-of-band preview of a finished response. The dashboard card
         carries the full text - the daemon streams it - so only a capped preview is
-        sent, and nothing is sent for an empty response.
+        sent, and nothing is sent for an empty response. The title prefix and dashboard
+        label default to the wording the Claude and Codex adapters use; the Copilot
+        hook overrides them for its own phrasing.
     #>
     param(
         [Parameter(Mandatory)][string]$SessionName,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Response,
-        [Parameter(Mandatory)][hashtable]$Headers
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [string]$TitlePrefix = 'Response',
+        [string]$DashboardLabel = 'the dashboard'
     )
 
     if ([string]::IsNullOrWhiteSpace($Response)) { return }
 
     $preview = $Response
     if ($preview.Length -gt 880) {
-        $preview = $preview.Substring(0, 880).TrimEnd() + "...`n`nFull response is on the dashboard."
+        $preview = $preview.Substring(0, 880).TrimEnd() + "...`n`nFull response is on $DashboardLabel."
     }
-    Send-BridgeNotification -Title (Format-BridgeNotificationTitle "Response: $SessionName") `
+    Send-BridgeNotification -Title (Format-BridgeNotificationTitle "${TitlePrefix}: $SessionName") `
         -Message $preview -Headers $Headers
 }

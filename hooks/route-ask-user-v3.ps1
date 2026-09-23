@@ -41,6 +41,7 @@ try {
     . (Join-Path $PSScriptRoot 'decision-bridge-common.ps1')
     . (Join-Path $PSScriptRoot 'decision-mqtt.ps1')
     . (Join-Path $PSScriptRoot 'decision-ha-websocket.ps1')
+    . (Join-Path $PSScriptRoot 'bridge-adapter.ps1')
 
     $rawEvent = [Console]::In.ReadToEnd()
     if ([string]::IsNullOrWhiteSpace($rawEvent)) {
@@ -76,37 +77,20 @@ try {
     $workingDirectory = [string]$event.cwd
     if ([string]::IsNullOrWhiteSpace($workingDirectory)) { $workingDirectory = 'Unknown folder' }
 
-    # Probe before committing to any Home Assistant work: this hook runs before the native prompt appears.
-    # A host that is gone is detected in about a second; one that answers gets a
-    # budget generous enough for discovery, the registry rename and arming.
-    if (-not (Test-HomeAssistantReachable -TimeoutSec 2)) {
-        Write-DecisionBridgeLog -Message 'Home Assistant unreachable; skipping (the daemon will catch up)'
-        Write-AllowDecision
-    }
-    Set-DecisionBridgeDeadline -Seconds 45
-    $headers = Get-HomeAssistantHeaders
+    # This hook runs before the native prompt appears; it must never wait on the
+    # network. Enter-BridgeAdapterSession probes, sets the deadline and returns headers
+    # when Home Assistant is reachable, or $null when it is not.
+    $headers = Enter-BridgeAdapterSession
+    if (-not $headers) { Write-AllowDecision }
     $display = Get-CopilotSessionDisplay -SessionId $sessionId -WorkingDirectory $workingDirectory
     $node = Get-CopilotMqttNodeId -SessionId $sessionId
-    $decisionEntity = "select.${node}_decision"
     $decisionId = "$($node)-$($event.timestamp)"
 
     # Ensure this session's entities exist. The daemon publishes them within a
     # reconcile interval of session start, but an ask_user in the first seconds of a
     # brand-new session may beat it, so publish on demand and force deterministic ids.
-    $exists = $false
-    try {
-        $probe = Get-HomeAssistantState -EntityId $decisionEntity -Headers $headers
-        $exists = ($null -ne $probe -and [string]$probe.state -notin @('unavailable', ''))
-    }
-    catch {
-        $exists = $false
-    }
-    if (-not $exists) {
-        Publish-CopilotMqttSession -SessionId $sessionId -SessionName $display.Name `
-            -Machine $display.Machine -Headers $headers | Out-Null
-        Start-Sleep -Milliseconds 1500
-        [void](Set-CopilotMqttEntityIds -SessionId $sessionId)
-    }
+    [void](Confirm-BridgeSessionEntities -SessionId $sessionId -SessionName $display.Name `
+        -Machine $display.Machine -Headers $headers -ProbeEntity "select.${node}_decision")
 
     Set-CopilotMqttDecision -SessionId $sessionId -SessionName $display.Name `
         -Machine $display.Machine -Question $question -Choices $choices `
@@ -144,8 +128,7 @@ try {
         ) -join "`n"
     }
     if ($body.Length -gt 950) { $body = $body.Substring(0, 947) + '...' }
-    $title = "Copilot: $($display.Name)"
-    if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
+    $title = Format-BridgeNotificationTitle "Copilot: $($display.Name)"
     Send-BridgeNotification -Title $title -Message $body -Headers $headers
 
     # Return immediately. The native prompt is shown and answerable; Home Assistant is

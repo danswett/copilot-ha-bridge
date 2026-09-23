@@ -16,6 +16,7 @@ $ErrorActionPreference = 'Stop'
 
 try {
     . (Join-Path $PSScriptRoot 'decision-bridge-common.ps1')
+    . (Join-Path $PSScriptRoot 'bridge-adapter.ps1')
 
     $rawEvent = [Console]::In.ReadToEnd()
     if ([string]::IsNullOrWhiteSpace($rawEvent)) {
@@ -56,16 +57,9 @@ try {
 
     $display = Get-CopilotSessionDisplay -SessionId $sessionId -WorkingDirectory ([string]$event.cwd)
 
-    # Push payloads cap well below a typical CLI response, so send a preview and let
-    # the dashboard card carry the full text.
-    $preview = $response
-    if ($preview.Length -gt 880) {
-        $preview = $preview.Substring(0, 880).TrimEnd() + "...`n`nFull response is on the Copilot Decisions dashboard."
-    }
-    $title = "Copilot response: $($display.Name)"
-    if ($title.Length -gt 190) { $title = $title.Substring(0, 187) + '...' }
-
-    Send-BridgeNotification -Title $title -Message $preview -Headers (Get-HomeAssistantHeaders)
+    Send-BridgeResponseNotification -SessionName $display.Name -Response $response `
+        -Headers (Get-HomeAssistantHeaders) -TitlePrefix 'Copilot response' `
+        -DashboardLabel 'the Copilot Decisions dashboard'
 }
 catch {
     try {
