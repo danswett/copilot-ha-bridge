@@ -1467,6 +1467,10 @@ function Sync-DaemonSessions {
             updated = [DateTimeOffset]::Now.ToString('o')
             history = @($activity.History | Select-Object -Last $script:DaemonConfig.ActivityHistory)
         }
+        # Persist the history alongside the summary and reasoning, so a daemon restart
+        # can restore the whole card rather than blanking it.
+        if ($entry.PSObject.Properties['LastHistory']) { $entry.LastHistory = $detail.history }
+        else { $entry | Add-Member -NotePropertyName LastHistory -NotePropertyValue $detail.history -Force }
         # The card shows the response in full; the expander is reserved for reasoning
         # and extra detail, so nothing is split off into a "show more" remainder.
         if (-not [string]::IsNullOrWhiteSpace($lastResponse)) {
@@ -1746,6 +1750,43 @@ function Resolve-SessionFromReplyEntity {
     $null
 }
 
+function Resolve-DaemonPrimedCard {
+    <#
+        Builds the (summary, detail) a restart should re-publish for a session from its
+        persisted display state, so a restart restores the card rather than blanking
+        it. Reasoning is included only when verbose is on, matching the reconcile, and
+        a session with no remembered activity falls back to a generic label.
+    #>
+    param(
+        [Parameter(Mandatory)]$Entry,
+        [Parameter(Mandatory)][ValidateSet('working', 'idle')][string]$Status,
+        [bool]$VerboseOn
+    )
+
+    $summary = if ($Entry.PSObject.Properties['LastSummary'] -and -not [string]::IsNullOrWhiteSpace([string]$Entry.LastSummary)) {
+        [string]$Entry.LastSummary
+    }
+    elseif ($Status -eq 'working') { 'Working' } else { 'Idle' }
+
+    $detail = @{
+        session = $Entry.Name
+        machine = $Entry.Machine
+        verbose = $VerboseOn
+        updated = [DateTimeOffset]::Now.ToString('o')
+    }
+    if ($Entry.PSObject.Properties['LastHistory'] -and $Entry.LastHistory) {
+        $detail['history'] = @($Entry.LastHistory)
+    }
+    if ($Entry.PSObject.Properties['LastResponse'] -and -not [string]::IsNullOrWhiteSpace([string]$Entry.LastResponse)) {
+        $detail['response'] = [string]$Entry.LastResponse
+    }
+    if ($VerboseOn -and $Entry.PSObject.Properties['LastReasoning'] -and -not [string]::IsNullOrWhiteSpace([string]$Entry.LastReasoning)) {
+        $detail['reasoning'] = [string]$Entry.LastReasoning
+    }
+
+    [pscustomobject]@{ Summary = $summary; Detail = $detail }
+}
+
 function Start-BridgeDaemon {
     $headers = Get-HomeAssistantHeaders
     $state = Read-DaemonState
@@ -1775,13 +1816,21 @@ function Start-BridgeDaemon {
     # This is a handful of publishes once per daemon start, so it is done
     # unconditionally rather than guarded.
     Sync-DaemonSessions -Headers $headers -State $state
+    # Reasoning is only shown while the verbose toggle is on, matching the reconcile,
+    # so read it once for the restore below.
+    $primeVerbose = Test-VerboseStreaming -Headers $headers
     foreach ($session in $live.Values) {
         $sid = $session.SessionId
         $entry = $state[$sid]
         if ($null -eq $entry) { continue }
         $node = Get-CopilotMqttNodeId -SessionId $sid
         $status = if (Test-CopilotSessionWorking -SessionId $sid) { 'working' } else { 'idle' }
-        $activity = if ($status -eq 'working') { 'Working' } else { 'Idle' }
+
+        # Restore the card from persisted display state rather than blanking it. A
+        # restart - including the one an update triggers - must not wipe the summary,
+        # the reasoning, the last response, or the history the card was showing.
+        $card = Resolve-DaemonPrimedCard -Entry $entry -Status $status -VerboseOn $primeVerbose
+
         try {
             Set-CopilotMqttStatus -SessionId $sid -Status $status -Headers $headers -Attributes @{
                 session = $entry.Name
@@ -1789,8 +1838,7 @@ function Start-BridgeDaemon {
                 process_id = $session.ProcessId
                 updated = [DateTimeOffset]::Now.ToString('o')
             }
-            Set-CopilotMqttActivity -SessionId $sid -Summary $activity `
-                -Detail @{ session = $entry.Name; machine = $entry.Machine } -Headers $headers
+            Set-CopilotMqttActivity -SessionId $sid -Summary $card.Summary -Detail $card.Detail -Headers $headers
             # Prime the reply box to empty so the card shows a blank field, not
             # 'unknown', for sessions restored from persisted state.
             Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $headers `

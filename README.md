@@ -249,6 +249,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-reliability.ps1      # request budget, StrictMode safety, stale-state pruning
 .\tests\test-update.ps1           # version comparison, release cache, failure safety
 .\tests\test-update-outcome.ps1   # install spinner + updated/failed notification
+.\tests\test-restart-restore.ps1  # a daemon restart restores cards instead of blanking them
 .\tests\test-verbose-toggle.ps1   # Live Verbose helper is provisioned without ever resetting it
 ```
 
