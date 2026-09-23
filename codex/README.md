@@ -93,17 +93,23 @@ Note that `PermissionRequest` only fires in an interactive session. `codex exec`
 reports `approval: never` regardless of `approval_policy`, because it has no way to
 ask.
 
-**Chain-of-thought is wired but unproven.** The reducer reads the rollout transcript
-for `Reasoning` items, gated on the same **Live Verbose** toggle as the other
-adapters. It is written to the contract in codex-rs — `ThreadItemDetails` declares a
-`Reasoning` variant holding `{ text }` — and covered by tests.
+**Chain-of-thought is wired and verified.** The reducer reads the rollout transcript
+for reasoning items, gated on the same **Live Verbose** toggle as the other adapters.
 
-It has never produced anything, because no model has been observed emitting one:
-across 26 real rollouts, including runs with `model_reasoning_effort=high` and
-`model_reasoning_summary=detailed`, only `AgentMessage`, `UserMessage` and
-`CommandExecution` ever appeared. If reasoning starts being emitted it will show up;
-until then the card is unchanged. The distinction between *implemented* and
-*observed* is deliberate, and the test suite says so too.
+Reasoning is written twice per turn, and the reducer reads either shape:
+
+    event_msg     -> item.type="Reasoning", item.summary_text=[ "..." ]
+    response_item -> payload.type="reasoning", summary=[{type:"summary_text",text}]
+
+What arrives is the model's *summary*, not raw chain-of-thought: `raw_content` is
+empty and `encrypted_content` is opaque by design, and the reducer never surfaces the
+ciphertext.
+
+It is **opt-in**. `reasoning_effort` is `null` by default — it was in 25 of 26
+captured rollouts — and a turn that does not reason emits no items at all, so an empty
+reasoning stream is normal rather than a fault. Set `model_reasoning_effort` to get
+one. Verified end to end: a reasoning item on a live session's rollout appears on the
+Home Assistant card with the summary joined and the ciphertext withheld.
 
 ## Tests
 

@@ -297,8 +297,10 @@ against a live session and what is not.
 
 [`codex/`](codex/) gives OpenAI Codex CLI a card per session showing the prompt, each
 command as it runs, and the final reply. Codex's hooks carry all of that directly, so
-no transcript reading is needed, and it is the only front end that fires an explicit
-`SessionEnd` — cards retire because the session ended, not because a process vanished.
+no transcript reading is needed for activity, and it is the only front end that fires
+an explicit `SessionEnd` — cards retire because the session ended, not because a
+process vanished. With **Live Verbose** on and `model_reasoning_effort` set, the
+rollout is also read for the model's reasoning summary.
 
 ```powershell
 cd codex
