@@ -1,17 +1,18 @@
-# Copilot CLI ⇄ Home Assistant bridge
+# AI coding agent ⇄ Home Assistant bridge
 
-Answer GitHub Copilot CLI prompts from Home Assistant — or from your terminal —
-whichever you happen to be looking at.
+Answer your AI coding agent from Home Assistant — or from your terminal — whichever you
+happen to be looking at. Works with **GitHub Copilot CLI**, **Claude Code**, **OpenAI
+Codex CLI**, and any **MCP client**.
 
-Every live CLI session gets its own card on a Home Assistant dashboard showing what
-it's doing, what it just said, and what it's waiting on. When Copilot asks a question,
-the card grows the matching controls. Whatever you pick is typed into the real
-terminal prompt, so the terminal never stops working and nothing is ever answered
-twice.
+Every live session gets its own card on a Home Assistant dashboard showing what it's
+doing, what it just said, and what it's waiting on. When the agent asks a question, the
+card grows the matching controls. Whatever you pick is typed into the real terminal
+prompt, so the terminal never stops working and nothing is ever answered twice.
 
-> **Windows only.** Answers are delivered into the running CLI with `AttachConsole` +
-> `WriteConsoleInput`, which is Win32-specific. Everything else is portable, but that
-> part is the point of the project.
+> **Windows only** for the terminal integration. Answers are delivered into the running
+> CLI with `AttachConsole` + `WriteConsoleInput`, which is Win32-specific. Everything
+> else is portable — and the [MCP server](mcp/) needs no console injection at all, so
+> it runs on any OS.
 
 ---
 
@@ -32,15 +33,33 @@ when idle.
 
 ---
 
+## Supported clients
+
+| Client | Support |
+|---|---|
+| **GitHub Copilot CLI** — the origin | The full experience: decisions, live activity, chain-of-thought, multi-field forms, and reply-after-the-turn. Set up by [`install.ps1`](#install). |
+| **Claude Code** | The full stack too — the same four primitives, the same card. See [`claude/`](claude/). |
+| **OpenAI Codex CLI** | Cards, live activity, command approvals, and the reasoning summary; replies are delivered back into the session. See [`codex/`](codex/). |
+| **Any MCP client** — Claude Desktop, ChatGPT, … | The *ask* half only, on any OS: a Home Assistant card races the app's own prompt and cancels whichever loses. See [`mcp/`](mcp/). |
+
+The Windows daemon, dashboard, and Home Assistant plumbing are shared; each client is
+just a thin adapter onto them.
+
+---
+
 ## How it works
 
 ```
-Copilot CLI ──hooks──► bridge scripts ──REST/WS──► Home Assistant
+Your AI CLI ──hooks──► bridge scripts ──REST/WS──► Home Assistant
      ▲                                                   │
      └────── console injection ◄─── bridge daemon ◄───────┘
                                     (tails transcripts,
                                      watches entities)
 ```
+
+The example below is the Copilot CLI path; Claude Code, Codex CLI, and the MCP server
+each fill the same three roles — intercept a prompt, stream activity, deliver an answer
+— through their own thin adapter.
 
 * **`route-ask-user-v3.ps1`** (`preToolUse`) arms the session's card when Copilot calls
   `ask_user`, then returns immediately. It does **not** block, so the native terminal
@@ -61,7 +80,9 @@ only a Home Assistant token.
 ## Requirements
 
 * Windows 10/11 and **PowerShell 7+**
-* [GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli)
+* At least one supported client. **[GitHub Copilot CLI](https://docs.github.com/copilot/how-tos/use-copilot-agents/use-copilot-cli)**
+  is set up by the base install; **Claude Code**, **Codex CLI**, and **MCP clients** are
+  added by their own installers ([`claude/`](claude/), [`codex/`](codex/), [`mcp/`](mcp/))
 * Home Assistant with the **MQTT integration** configured (any broker)
 * A Home Assistant **long-lived access token**
 * These HACS frontend cards:
