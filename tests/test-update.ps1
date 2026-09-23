@@ -94,7 +94,6 @@ try {
 
     Write-Host '--- failure is survivable ---'
     Remove-Item -LiteralPath $cachePath -Force -ErrorAction SilentlyContinue
-    $original = Get-BridgeSetting 'updates.repository' ''
     $script:DecisionBridgeConfig.UpdateRepositoryOverride = $null
     # Point at a repository that cannot exist, which is the same shape as an outage.
     function Get-BridgeUpdateRepository { 'danswett/this-repository-does-not-exist-9f8e7d' }

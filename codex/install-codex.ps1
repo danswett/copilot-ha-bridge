@@ -32,7 +32,6 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
-$codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $installHome '.codex' }
 $bridgeRoot = Join-Path $installHome '.copilot\codex-bridge'
 $marketplaceName = 'copilot-ha-bridge'
 $pluginName = 'copilot-ha-bridge'

@@ -1,0 +1,112 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  powershell:
+    name: PowerShell (parse, lint, tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse-check every PowerShell file
+        shell: pwsh
+        run: |
+          $errors = 0
+          Get-ChildItem -Recurse -Include *.ps1, *.psm1, *.psd1 |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object {
+              $parseErrors = $null
+              [void][System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$null, [ref]$parseErrors)
+              if ($parseErrors -and $parseErrors.Count) {
+                $errors += $parseErrors.Count
+                foreach ($e in $parseErrors) {
+                  Write-Host "::error file=$($_.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"
+                }
+              }
+            }
+          if ($errors) { throw "$errors parse error(s) found" }
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser -ErrorAction Stop
+          $findings = Get-ChildItem -Recurse -Include *.ps1, *.psm1 |
+            Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' } |
+            ForEach-Object { Invoke-ScriptAnalyzer -Path $_.FullName -Settings ./PSScriptAnalyzerSettings.psd1 }
+          foreach ($f in $findings) {
+            Write-Host "::warning file=$($f.ScriptName),line=$($f.Line)::$($f.RuleName): $($f.Message)"
+          }
+          if ($findings -and @($findings).Count) { throw "$(@($findings).Count) PSScriptAnalyzer finding(s)" }
+
+      - name: PowerShell test suites (Home Assistant free)
+        shell: pwsh
+        env:
+          HA_BASE_URL: http://127.0.0.1:1
+          HA_TOKEN: ci-dummy-token
+        run: |
+          $suites = @(
+            'tests/test-decision-args.ps1'
+            'tests/test-decision-retry.ps1'
+            'tests/test-install-clients.ps1'
+            'tests/test-reliability.ps1'
+            'tests/test-restart-restore.ps1'
+            'tests/test-security.ps1'
+            'tests/test-update.ps1'
+            'tests/test-update-outcome.ps1'
+            'tests/test-verbose-toggle.ps1'
+            'codex/tests/test-codex.ps1'
+            'claude/tests/test-claude-ask-parser.ps1'
+            'claude/tests/test-claude-transcript.ps1'
+          )
+          $failed = @()
+          foreach ($suite in $suites) {
+            Write-Host "::group::$suite"
+            pwsh -NoProfile -File $suite
+            $code = $LASTEXITCODE
+            Write-Host "::endgroup::"
+            if ($code -ne 0) {
+              $failed += $suite
+              Write-Host "::error::$suite exited with $code"
+            }
+          }
+          if ($failed.Count) { throw "Failed suites: $($failed -join ', ')" }
+
+  node:
+    name: MCP server (Node)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check server sources
+        run: |
+          for f in src/*.js; do node --check "$f"; done
+
+      - name: HTTP transport tests
+        run: |
+          node test/test-http.js
+          node test/test-http-e2e.js
