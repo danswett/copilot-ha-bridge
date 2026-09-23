@@ -103,7 +103,8 @@ jobs:
         run: |
           for f in src/*.js; do node --check "$f"; done
 
-      - name: HTTP transport tests
+      - name: MCP server tests
         run: |
+          node test/test-ha.js
           node test/test-http.js
           node test/test-http-e2e.js

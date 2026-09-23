@@ -10,6 +10,7 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { readFileSync } from 'node:fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
@@ -75,6 +76,14 @@ try {
     requestInit: { headers: { authorization: `Bearer ${TOKEN}` } },
   }));
   check('an authenticated MCP client connects', true);
+
+  const reported = client.getServerVersion();
+  const expectedVersion = readFileSync(path.join(here, '..', '..', 'VERSION'), 'utf8').trim().replace(/^v/i, '');
+  check(
+    'the server reports the bridge release version',
+    reported?.version === expectedVersion,
+    `${reported?.version} vs ${expectedVersion}`,
+  );
 
   const tools = await client.listTools();
   const names = tools.tools.map((tool) => tool.name);

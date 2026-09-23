@@ -7,6 +7,8 @@
  */
 
 export class HomeAssistant {
+  #authWarned = false;
+
   constructor({ baseUrl, token }) {
     if (!baseUrl) throw new Error('Home Assistant base URL is required.');
     if (!token) throw new Error('Home Assistant token is required.');
@@ -21,7 +23,9 @@ export class HomeAssistant {
   async #request(path, init = {}) {
     const response = await fetch(`${this.baseUrl}${path}`, { ...init, headers: this.#headers });
     if (!response.ok) {
-      throw new Error(`Home Assistant ${init.method ?? 'GET'} ${path} failed: ${response.status}`);
+      const error = new Error(`Home Assistant ${init.method ?? 'GET'} ${path} failed: ${response.status}`);
+      error.status = response.status;
+      throw error;
     }
     const text = await response.text();
     return text ? JSON.parse(text) : null;
@@ -42,7 +46,14 @@ export class HomeAssistant {
   async getState(entityId) {
     try {
       return await this.#request(`/api/states/${entityId}`);
-    } catch {
+    } catch (error) {
+      // A 404 is the normal "entity does not exist yet" case while provisioning. A
+      // 401/403 means the token is bad or revoked - surface that once to stderr so it
+      // is diagnosable, instead of looking forever like a missing entity.
+      if ((error?.status === 401 || error?.status === 403) && !this.#authWarned) {
+        this.#authWarned = true;
+        process.stderr.write(`[ha] authentication failed (${error.status}); check the Home Assistant token\n`);
+      }
       return null;
     }
   }

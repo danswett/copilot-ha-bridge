@@ -38,8 +38,30 @@ import {
 import { describeSchema, outlineFor, valueForLabel } from './schema.js';
 import { DEFAULT_URL_PATH, ensureDashboard, removeFromDashboard } from './dashboard.js';
 import { startHttpTransport } from './http.js';
+import { readFileSync } from 'node:fs';
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
+
+// Report the packaged version rather than a hard-coded literal, so an MCP client
+// shows the bridge release it is actually running. The VERSION file sits at the
+// repo root in a dev checkout and is copied next to the server by install-mcp.ps1,
+// so try both layouts, then fall back to the package manifest.
+function serverVersion() {
+  for (const rel of ['../VERSION', '../../VERSION']) {
+    try {
+      const raw = readFileSync(new URL(rel, import.meta.url), 'utf8').trim();
+      if (raw) return raw.replace(/^v/i, '');
+    } catch {
+      // Try the next candidate location.
+    }
+  }
+  try {
+    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return pkg.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+}
 
 function loadConfig() {
   const baseUrl = process.env.HA_BASE_URL;
@@ -107,7 +129,7 @@ async function main() {
   const ha = new HomeAssistant(config);
 
   const server = new Server(
-    { name: 'copilot-ha-bridge', version: '0.1.0' },
+    { name: 'copilot-ha-bridge', version: serverVersion() },
     { capabilities: { tools: {} } },
   );
 

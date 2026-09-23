@@ -105,6 +105,10 @@ $destSrc = Join-Path $mcpDir 'src'
 if (Test-Path -LiteralPath $destSrc) { Remove-Item -LiteralPath $destSrc -Recurse -Force }
 Copy-Item (Join-Path $PSScriptRoot 'src') $mcpDir -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot 'package.json') $mcpDir -Force
+# Copy the release marker next to the server so it reports the bridge version it is
+# actually running (server.js reads VERSION, falling back to package.json).
+$mcpVersionFile = Join-Path $PSScriptRoot '..\VERSION'
+if (Test-Path -LiteralPath $mcpVersionFile) { Copy-Item $mcpVersionFile $mcpDir -Force }
 if (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'package-lock.json')) {
     Copy-Item (Join-Path $PSScriptRoot 'package-lock.json') $mcpDir -Force
 }
