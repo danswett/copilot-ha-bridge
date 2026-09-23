@@ -1209,7 +1209,7 @@ function Sync-DaemonUpdateStatus {
     #>
     param([Parameter(Mandatory)][hashtable]$Headers)
 
-    # A pending self-update result is announced regardless of the daily-check opt-out:
+    # A pending self-update result is announced regardless of the update-check opt-out:
     # it is the response to the user pressing install, not a background poll.
     Invoke-DaemonUpdateOutcome -Headers $Headers
 

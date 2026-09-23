@@ -11,9 +11,9 @@
     Your configuration is preserved: the installer reads the existing config, backs it
     up, and writes it back with only what you pass on the command line changed.
 
-    The daemon performs the same check once a day and surfaces the result as a Home
-    Assistant `update` entity, so you normally learn about a new version there rather
-    than by running this.
+    The daemon performs the same check a few times a day and surfaces the result as a
+    Home Assistant `update` entity, so you normally learn about a new version there
+    rather than by running this.
 
 .PARAMETER Check
     Report what is available and exit without installing anything.

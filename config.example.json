@@ -19,6 +19,7 @@
   "updates": {
     "repository": "danswett/copilot-ha-bridge",
     "installedVersion": "",
-    "checkForUpdates": true
+    "checkForUpdates": true,
+    "checkHours": 6
   }
 }

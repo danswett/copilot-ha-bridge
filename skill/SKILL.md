@@ -92,6 +92,7 @@ needed** — entities are published through Home Assistant's own `mqtt.publish` 
 | `decision-mqtt.ps1` | Per-session MQTT discovery: publish, arm/clear a decision, set status and activity, tear down |
 | `decision-ha-websocket.ps1` | Entity-registry reads and renames, scoped `subscribe_trigger` waits, dashboard generation |
 | `decision-inject.ps1` | `AttachConsole` + `WriteConsoleInput` delivery, with session→pid lookup from `inuse.<pid>.lock` |
+| `bridge-adapter.ps1` | Shared adapter orchestration reused by every client's hooks: the reachability gate, publish-on-demand, status/activity, and notifications |
 | `copilot-bridge-daemon.ps1` | The loop: reconcile sessions, stream activity, sweep orphans, deliver answers |
 | `copilot-bridge-supervisor.ps1` | Keeps one daemon alive with backoff; named mutex prevents a second instance |
 | `route-ask-user-v3.ps1` | The non-blocking `ask_user` router |

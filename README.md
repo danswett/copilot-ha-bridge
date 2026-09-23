@@ -227,7 +227,8 @@ dashboard view.
 
 ## Updating
 
-The daemon asks GitHub for the newest release once a day and publishes the result as
+The daemon asks GitHub for the newest release a few times a day (every 6 hours by
+default, tunable via `updates.checkHours`) and publishes the result as
 a Home Assistant **update entity**, so a new version shows up on the dashboard and in
 Home Assistant's own Updates list — with the release notes and a one-press **Install
 now** button. Pressing it shows a spinner while the install runs and leaves a

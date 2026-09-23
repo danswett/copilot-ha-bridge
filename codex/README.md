@@ -114,12 +114,15 @@ Home Assistant card with the summary joined and the ciphertext withheld.
 ## Tests
 
 ```powershell
-.\tests\test-codex.ps1
+.\tests\test-codex.ps1              # hook parsing, naming, path safety, reducer; no HA needed
+.\tests\test-codex-integration.ps1  # drives the hook against a real Home Assistant
 ```
 
-Covers hook parsing against the real captured payloads, session naming, path safety,
-approval markers, and the rollout reducer. Needs no Home Assistant and no Codex
-session.
+`test-codex.ps1` covers hook parsing against the real captured payloads, session
+naming, path safety, approval markers, and the rollout reducer — no Home Assistant and
+no Codex session. `test-codex-integration.ps1` drives the hook with the fixtures on a
+real Home Assistant, checking the card publishes, tracks status and activity, and
+retires; it needs the bridge installed and is not part of CI.
 
 ## Uninstall
 
