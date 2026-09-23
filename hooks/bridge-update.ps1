@@ -165,7 +165,10 @@ function Invoke-BridgeSelfUpdate {
     #>
     param(
         [switch]$Detached,
-        [string]$TargetHome
+        [string]$TargetHome,
+        # Return the generated updater script instead of writing and launching it, so
+        # its content can be verified in tests without downloading or installing.
+        [switch]$ScriptOnly
     )
 
     $status = Get-BridgeUpdateStatus -Force
@@ -178,10 +181,18 @@ function Invoke-BridgeSelfUpdate {
 
     $staging = Join-Path $env:TEMP "copilot-ha-bridge-update-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     $script = Join-Path $staging 'run-update.ps1'
-    New-Item -ItemType Directory -Path $staging -Force | Out-Null
 
-    $targetArgument = if ($TargetHome) { " -TargetHome '$TargetHome'" } else { '' }
-    @"
+    # Validate and single-quote-escape TargetHome before it is written into the
+    # generated script, so a value containing a quote cannot alter the command line.
+    $targetArgument = ''
+    if ($TargetHome) {
+        $resolvedTarget = try { (Resolve-Path -LiteralPath $TargetHome -ErrorAction Stop).Path } catch { $null }
+        if (-not $resolvedTarget -or -not (Test-Path -LiteralPath $resolvedTarget -PathType Container)) {
+            return [pscustomobject]@{ Started = $false; Detail = "TargetHome '$TargetHome' is not an existing directory" }
+        }
+        $targetArgument = " -TargetHome '$($resolvedTarget -replace "'", "''")'"
+    }
+    $scriptText = @"
 `$ErrorActionPreference = 'Stop'
 `$staging = '$staging'
 `$log = Join-Path `$env:TEMP 'copilot-bridge-update.log'
@@ -195,6 +206,17 @@ try {
     Expand-Archive -LiteralPath `$zip -DestinationPath `$staging -Force
     `$root = Get-ChildItem -LiteralPath `$staging -Directory | Select-Object -First 1
     if (-not `$root) { throw 'the archive did not contain the expected folder' }
+
+    # Verify the downloaded archive really is the release we resolved before running
+    # its installer. GitHub source archives are unsigned, so this is not a
+    # cryptographic guarantee, but it rejects a corrupt, truncated, or wrong-version
+    # archive rather than executing whatever happened to download.
+    `$versionFile = Join-Path `$root.FullName 'VERSION'
+    if (-not (Test-Path -LiteralPath `$versionFile)) { throw 'the archive has no VERSION file' }
+    `$archiveVersion = (Get-Content -LiteralPath `$versionFile -Raw).Trim() -replace '^[vV]', ''
+    if (`$archiveVersion -ne '$($status.Latest)') {
+        throw "archive version `$archiveVersion does not match the expected release $($status.Latest)"
+    }
 
     Write-UpdateLog "installing from `$(`$root.FullName)"
     # The existing config is preserved and backed up by the installer, so no
@@ -219,7 +241,11 @@ catch {
 finally {
     Remove-Item -LiteralPath `$staging -Recurse -Force -ErrorAction SilentlyContinue
 }
-"@ | Set-Content -LiteralPath $script -Encoding UTF8
+"@
+
+    if ($ScriptOnly) { return $scriptText }
+    New-Item -ItemType Directory -Path $staging -Force | Out-Null
+    $scriptText | Set-Content -LiteralPath $script -Encoding UTF8
 
     if ($Detached) {
         Start-Process -FilePath (Get-Command pwsh).Source `

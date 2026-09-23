@@ -112,6 +112,45 @@ finally {
     if (Test-Path -LiteralPath $backup) { Move-Item $backup $cachePath -Force }
 }
 
+Write-Host '--- the generated updater is integrity-checked and safely quoted ---'
+function Get-BridgeUpdateStatus {
+    param([switch]$Force)
+    [pscustomobject]@{
+        Installed = '1.0.0'; Latest = '9.9.9'; Available = $true
+        Url = 'https://github.com/x/y/releases/tag/v9.9.9'
+        Notes = ''; Zip = 'https://api.github.com/repos/x/y/zipball/v9.9.9'
+    }
+}
+$generated = Invoke-BridgeSelfUpdate -ScriptOnly
+Test-That 'the updater verifies the archive VERSION against the resolved release' {
+    ($generated -match 'archiveVersion') -and ($generated -match '9\.9\.9')
+}
+Test-That 'the updater still runs the installer non-interactively' {
+    $generated -match 'install\.ps1.*-NonInteractive'
+}
+Test-That 'no -TargetHome argument is emitted when none is supplied' {
+    $generated -notmatch '-TargetHome'
+}
+$genValid = Invoke-BridgeSelfUpdate -ScriptOnly -TargetHome $env:TEMP
+Test-That 'a valid TargetHome is passed through to the installer' {
+    $genValid -match "-TargetHome '"
+}
+$quoteDir = Join-Path $env:TEMP ("bridge'quote-" + [guid]::NewGuid().ToString('N').Substring(0, 6))
+New-Item -ItemType Directory -Path $quoteDir -Force | Out-Null
+try {
+    $genQuote = Invoke-BridgeSelfUpdate -ScriptOnly -TargetHome $quoteDir
+    Test-That 'a single quote in TargetHome is doubled, not broken out of' {
+        $genQuote -match "-TargetHome '.*''.*'"
+    }
+}
+finally {
+    Remove-Item -LiteralPath $quoteDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+$bogus = Invoke-BridgeSelfUpdate -TargetHome 'Z:\definitely\not\here\at\all'
+Test-That 'a non-existent TargetHome is refused, never interpolated' {
+    ($bogus.Started -eq $false) -and ($bogus.Detail -match 'not an existing directory')
+}
+
 Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) test(s) failed" -ForegroundColor Red
