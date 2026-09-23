@@ -225,9 +225,10 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-security.ps1         # template injection, path and topic safety, token handling
 .\tests\test-reliability.ps1      # request budget, StrictMode safety, stale-state pruning
 .\tests\test-update.ps1           # version comparison, release cache, failure safety
+.\tests\test-verbose-toggle.ps1   # Live Verbose helper is provisioned without ever resetting it
 ```
 
-Both are plain PowerShell, need no Home Assistant, and run in a couple of seconds.
+These are plain PowerShell, need no Home Assistant, and run in a couple of seconds.
 The Claude adapter and the MCP server have their own suites — see their READMEs.
 
 ---
@@ -293,7 +294,7 @@ cd claude
 See [`claude/README.md`](claude/README.md), which states exactly what is verified
 against a live session and what is not.
 
-### Codex CLI — session cards and live activity
+### Codex CLI — cards, approvals, and reasoning
 
 [`codex/`](codex/) gives OpenAI Codex CLI a card per session showing the prompt, each
 command as it runs, and the final reply. Codex's hooks carry all of that directly, so
@@ -317,6 +318,12 @@ Codex or they are skipped silently.
 [`mcp/`](mcp/) holds a separate MCP server that brings the *ask* half of this to
 Claude Desktop and other MCP clients, on any OS. It races a Home Assistant card
 against the app's own elicitation prompt and cancels whichever loses.
+
+It speaks stdio by default, and can also serve over HTTP for clients that can't start
+a local process — ChatGPT among them. That listener binds to localhost and requires a
+bearer token, and refuses to start on a public interface without one, because the
+server holds an unscopable Home Assistant token; reach it remotely through a tunnel
+rather than by opening a port.
 
 It is a sibling, not a replacement: an MCP server never sees the transcript and can't
 start a turn, so there is no activity streaming and no reply-after-the-turn. See
