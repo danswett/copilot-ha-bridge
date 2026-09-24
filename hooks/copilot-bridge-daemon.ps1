@@ -1229,6 +1229,82 @@ function Invoke-DaemonUpdateOutcome {
     }
 }
 
+function Invoke-PendingStops {
+    <#
+        Ends any session whose End button has been pressed.
+
+        Uses the same press-timestamp contract as the Submit and Launch buttons: a
+        press from before this daemon started is a retained value from an earlier
+        run, and a press already acted on is recorded per session so one press can
+        never end two sessions or the same session twice.
+
+        Ending is graceful - `/exit` typed into the console - so the CLI writes its
+        transcript and releases its lock. The session therefore stays resumable, and
+        the next reconcile retires its entities the same way a session that exited at
+        the keyboard would be.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [Parameter(Mandatory)][hashtable]$State,
+        [Parameter(Mandatory)][hashtable]$Live
+    )
+
+    foreach ($sessionId in @($State.Keys)) {
+        if (-not $Live.ContainsKey($sessionId)) { continue }
+
+        $node = Get-CopilotMqttNodeId -SessionId $sessionId
+        $press = ''
+        try {
+            $button = Get-HomeAssistantState -EntityId "button.${node}_stop" -Headers $Headers
+            $press = [string]$button.state
+        }
+        catch {
+            # The button does not exist yet for sessions published before it existed;
+            # the next reconcile provisions it.
+            continue
+        }
+
+        if ($press -in @('unknown', 'unavailable', '')) { continue }
+
+        $entry = $State[$sessionId]
+        $lastStop = if ($entry.PSObject.Properties['LastStopAt']) { [string]$entry.LastStopAt } else { '' }
+        if ($press -eq $lastStop) { continue }
+
+        if ($entry.PSObject.Properties['LastStopAt']) { $entry.LastStopAt = $press }
+        else { $entry | Add-Member -NotePropertyName LastStopAt -NotePropertyValue $press -Force }
+
+        $pressedAt = [DateTimeOffset]::MinValue
+        if (-not [DateTimeOffset]::TryParse($press, [ref]$pressedAt)) { continue }
+        if ($pressedAt -le $script:DaemonStartedAt) { continue }
+
+        $session = $Live[$sessionId]
+        $processId = 0
+        if ($session.PSObject.Properties['ProcessId'] -and $session.ProcessId) { $processId = [int]$session.ProcessId }
+
+        $short = $sessionId.Substring(0, [Math]::Min(8, $sessionId.Length))
+        Write-DaemonLog -Message "end requested for $short (pid $processId)"
+
+        try {
+            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Ending session...' `
+                -Detail @{ session = [string]$entry.Name } -Headers $Headers
+        }
+        catch { }
+
+        $stop = Stop-BridgeCopilotSession -SessionId $sessionId -ProcessId $processId
+        if ($stop.Stopped) {
+            Write-DaemonLog -Message "ended $short : $($stop.Detail)"
+        }
+        else {
+            Write-DaemonLog -Message "could not end $short : $($stop.Detail)"
+            try {
+                Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Could not end session' `
+                    -Detail @{ session = [string]$entry.Name; error = [string]$stop.Detail } -Headers $Headers
+            }
+            catch { }
+        }
+    }
+}
+
 function Sync-DaemonUpdateStatus {
     <#
         Publishes the bridge's own update status, and acts on a press of the install
@@ -2351,6 +2427,28 @@ function Start-BridgeDaemon {
         $node = Get-CopilotMqttNodeId -SessionId $sid
         $status = if (Test-CopilotSessionWorking -SessionId $sid) { 'working' } else { 'idle' }
 
+        # Provision entities added after this session was first published. A session
+        # already recorded in state never goes through Sync-DaemonSessions' publish
+        # branch again, so an upgrade that introduces a new per-session entity would
+        # otherwise leave every running session without it until it exited. Done once
+        # per daemon start - which is exactly when an upgrade lands - rather than on
+        # every reconcile, to keep the steady-state request count unchanged.
+        try {
+            $probeStop = $null
+            try { $probeStop = Get-HomeAssistantState -EntityId "button.${node}_stop" -Headers $headers }
+            catch { $probeStop = $null }
+            if ($null -eq $probeStop) {
+                Publish-CopilotMqttSession -SessionId $sid -SessionName ([string]$entry.Name) `
+                    -Machine ([string]$entry.Machine) -Headers $headers | Out-Null
+                Start-Sleep -Milliseconds 1200
+                [void](Set-CopilotMqttEntityIds -SessionId $sid)
+                Write-DaemonLog -Message "provisioned end button for $($sid.Substring(0,8))"
+            }
+        }
+        catch {
+            Write-DaemonLog -Message "end-button provisioning failed for $sid : $($_.Exception.Message)"
+        }
+
         # Restore the card from persisted display state rather than blanking it. A
         # restart - including the one an update triggers - must not wipe the summary,
         # the reasoning, the last response, or the history the card was showing.
@@ -2378,6 +2476,7 @@ function Start-BridgeDaemon {
     Invoke-PendingDecisions -Headers $headers -State $state -Live $live
     Invoke-PendingReplies -Headers $headers -State $state -Live $live
     Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
+    Invoke-PendingStops -Headers $headers -State $state -Live $live
     Sync-DaemonUpdateStatus -Headers $headers
     Sync-DaemonNewSession -Headers $headers -Live $live
     Write-DaemonState -State $state
@@ -2443,6 +2542,7 @@ function Start-BridgeDaemon {
                 Invoke-PendingDecisions -Headers $headers -State $state -Live $live
                 Invoke-PendingReplies -Headers $headers -State $state -Live $live
                 Invoke-PendingCodexApprovals -Headers $headers -State $state -Live $live
+                Invoke-PendingStops -Headers $headers -State $state -Live $live
                 Sync-DaemonUpdateStatus -Headers $headers
                 Sync-DaemonNewSession -Headers $headers -Live $live
                 Write-DaemonState -State $state
@@ -2479,5 +2579,6 @@ if (-not $env:COPILOT_BRIDGE_DAEMON_NORUN) {
         $mutex.Dispose()
     }
 }
+
 
 

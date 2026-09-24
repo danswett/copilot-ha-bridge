@@ -92,6 +92,7 @@ function Get-CopilotMqttTopics {
         ActivityAttributes = "$root/activity/attr"
         FieldCommandPrefix = "$root/field"
         SubmitCommand = "$root/submit/set"
+        StopCommand = "$root/stop/set"
     }
 }
 
@@ -305,6 +306,24 @@ function Publish-CopilotMqttSession {
     Publish-CopilotMqttMessage -Topic "$prefix/button/$node/submit/config" `
         -Payload ($submitConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
+    # Ending a session from the dashboard. The bridge can already start one, and
+    # being able to start work remotely but not stop it means a session that has gone
+    # wrong can only be dealt with at the keyboard.
+    #
+    # Safe to press: the stop is graceful, and the transcript survives, so the
+    # session stays in the resume list and can be reopened. A mistaken press costs a
+    # window, not the work.
+    $stopConfig = @{
+        name          = 'End session'
+        unique_id     = "${node}_stop"
+        command_topic = $topics.StopCommand
+        icon          = 'mdi:stop-circle-outline'
+        device        = $device
+        availability  = $availability
+    }
+    Publish-CopilotMqttMessage -Topic "$prefix/button/$node/stop/config" `
+        -Payload ($stopConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
+
     $topics
 }
 
@@ -344,6 +363,8 @@ function Remove-CopilotMqttSession {
             -Payload '' -Headers $Headers -Retain
     }
     Publish-CopilotMqttMessage -Topic "$prefix/button/$node/submit/config" `
+        -Payload '' -Headers $Headers -Retain
+    Publish-CopilotMqttMessage -Topic "$prefix/button/$node/stop/config" `
         -Payload '' -Headers $Headers -Retain
 
     foreach ($topic in @(

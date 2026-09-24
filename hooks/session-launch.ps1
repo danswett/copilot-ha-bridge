@@ -562,6 +562,83 @@ function Start-BridgeCopilotSession {
     $result
 }
 
+function Stop-BridgeCopilotSession {
+    <#
+        Ends a running session.
+
+        Graceful first: `/exit` is typed into the session's console exactly as a reply
+        would be, so the CLI shuts down the way it does at the keyboard - writing its
+        transcript, closing its MCP servers and releasing the lock file. Only if it is
+        still there after the grace period is the process terminated, because a killed
+        CLI leaves a stale lock and half-written state behind.
+
+        This is deliberately non-destructive. The session's transcript survives either
+        way, so an ended session remains in the resume list and can be reopened; a
+        mistaken press costs a window, not the work.
+
+        Returns a result object rather than throwing - a failed stop must leave the
+        daemon running, like every other action here.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [Parameter(Mandatory)][int]$ProcessId,
+
+        # How long to let the CLI close itself before the process is terminated.
+        [int]$GraceSeconds = 12
+    )
+
+    $result = [pscustomobject]@{
+        Stopped = $false
+        Forced  = $false
+        Detail  = ''
+    }
+
+    if ($ProcessId -le 0) {
+        $result.Detail = 'no process id for session'
+        return $result
+    }
+
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($null -eq $process) {
+        # Already gone: report success, because the caller's goal is met.
+        $result.Stopped = $true
+        $result.Detail = "process $ProcessId had already exited"
+        return $result
+    }
+
+    $delivery = Send-CopilotSessionPrompt -SessionId $SessionId -ProcessId $ProcessId -Text '/exit'
+    if (-not $delivery.Delivered) {
+        $result.Detail = "could not type /exit: $($delivery.Detail)"
+    }
+
+    $deadline = [DateTimeOffset]::Now.AddSeconds($GraceSeconds)
+    while ([DateTimeOffset]::Now -lt $deadline) {
+        Start-Sleep -Milliseconds 500
+        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+            $result.Stopped = $true
+            $result.Detail = "exited cleanly (pid $ProcessId)"
+            return $result
+        }
+    }
+
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+        Start-Sleep -Milliseconds 800
+        $result.Stopped = ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
+        $result.Forced = $true
+        $result.Detail = if ($result.Stopped) {
+            "did not exit within $GraceSeconds s; terminated pid $ProcessId"
+        } else {
+            "could not terminate pid $ProcessId"
+        }
+    }
+    catch {
+        $result.Detail = "terminate failed: $($_.Exception.Message)"
+    }
+
+    $result
+}
+
 function Wait-BridgeSessionRegistered {
     <#
         Waits for the CLI to register the session it was told to create or resume.

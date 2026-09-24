@@ -257,6 +257,7 @@ function Resolve-CopilotMqttEntityIds {
     }
     for ($i = 1; $i -le 4; $i++) { $wanted["${node}_f$i"] = "Field$i" }
     $wanted["${node}_submit"] = 'Submit'
+    $wanted["${node}_stop"] = 'Stop'
 
     $registry = @(
         (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
@@ -919,13 +920,23 @@ ha-card {
             )
         }
 
+        # Ending the session. A plain row rather than a prominent button: it should be
+        # findable without being the easiest thing on the card to hit by accident.
+        # Safe either way - the stop is graceful and the session stays resumable.
+        $stopCard = @{
+            type = 'entities'
+            entities = @(
+                @{ entity = "button.${node}_stop"; name = 'End session'; icon = 'mdi:stop-circle-outline' }
+            )
+        }
+
         # Each session is a vertical stack of its own cards. In a masonry view these
         # stacks are packed into columns by height rather than aligned into rows, which
         # is what stops one tall session from leaving dead space under every shorter
         # card beside it.
         @{
             type = 'vertical-stack'
-            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard)
+            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard, $stopCard)
         }
     }
 
@@ -986,6 +997,7 @@ function Set-CopilotMqttEntityIds {
     # Per-field dropdowns for multi-field questions share the same treatment.
     for ($i = 1; $i -le 4; $i++) { $targets["Field$i"] = "select.${node}_f$i" }
     $targets['Submit'] = "button.${node}_submit"
+    $targets['Stop'] = "button.${node}_stop"
 
     $commands = @()
     foreach ($key in @($targets.Keys)) {

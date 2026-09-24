@@ -30,6 +30,7 @@ prompt, so the terminal never stops working and nothing is ever answered twice.
 | **Continuation** | Reply to a finished turn from your phone; it's typed into the session. |
 | **Start a conversation** | A session appears as soon as it opens, so you can send it its first prompt from the dashboard. |
 | **Launch a session** | Pick a workspace, type an opening prompt, press a button — a new CLI session opens on your desktop. |
+| **End a session** | An **End session** row on every card, so sessions don't just accumulate. |
 | **No polling** | State changes arrive over a Home Assistant WebSocket subscription. |
 
 The card glows **blue** while working, **amber** while waiting on you, and not at all
@@ -337,6 +338,21 @@ A few deliberate choices:
 The **Last launch** row reports what happened. It confirms success only once the new
 session has actually registered itself, not merely when a process started.
 
+### Ending a session
+
+Every session card has an **End session** row. Starting work remotely but not being
+able to stop it is a bad trade: a session that has gone wrong — wrong repo, stuck in a
+loop, burning credits — otherwise has to be dealt with at the keyboard, and sessions
+pile up.
+
+The stop is graceful. `/exit` is typed into the session's console exactly as a reply
+would be, so the CLI shuts down the way it does at the keyboard: transcript written,
+MCP servers closed, lock released. Only a session still running after the grace period
+is terminated outright, because a killed CLI leaves a stale lock and half-written state.
+
+It is safe to press. The transcript survives either way, so an ended session stays in
+the **Resume** list and can be reopened — a mistaken press costs a window, not the work.
+
 ---
 
 ## Updating
@@ -393,6 +409,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-update-outcome.ps1   # install spinner + updated/failed notification
 .\tests\test-restart-restore.ps1  # a daemon restart restores cards instead of blanking them
 .\tests\test-new-session.ps1      # launching a session: argument quoting, the workspace allowlist, press handling
+.\tests\test-stop-session.ps1     # ending a session: graceful /exit, terminate fallback, press handling
 .\tests\test-install-clients.ps1  # installer client selection (‑Clients, persisted, defaults)
 .\tests\test-verbose-toggle.ps1   # Detailed activity helper is provisioned without ever resetting it
 ```
