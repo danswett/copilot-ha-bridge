@@ -202,6 +202,49 @@ finally {
     Remove-Item -LiteralPath $detachDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Write-Host '--- the legacy cleanup runs once and re-publishes live sessions ---'
+# The sweep deletes a live session's old entities. Sync-DaemonSessions only
+# publishes sessions it has never seen, so unless the sweep also drops them from
+# state they end up with no card at all - old entities gone, new ones never made.
+$script:SweptTopics = @()
+function Clear-CopilotLegacyMqttEntities {
+    param([hashtable]$Headers, [string[]]$SessionIds = @())
+    $script:SweptTopics += @($SessionIds)
+    27
+}
+
+$cleanupMarker = Join-Path ([IO.Path]::GetTempPath()) "test-legacy-cleanup-$([guid]::NewGuid().ToString('N').Substring(0,8)).json"
+$origMarker = $script:DaemonConfig.LegacyCleanupMarker
+$script:DaemonConfig.LegacyCleanupMarker = $cleanupMarker
+try {
+    $liveSet = @{ 'sess-a' = [pscustomobject]@{ SessionId = 'sess-a' }; 'sess-b' = [pscustomobject]@{ SessionId = 'sess-b' } }
+    $stateSet = @{ 'sess-a' = [pscustomobject]@{ Offset = 10 }; 'sess-b' = [pscustomobject]@{ Offset = 20 }; 'sess-dead' = [pscustomobject]@{ Offset = 5 } }
+
+    $script:SweptTopics = @()
+    $n = Invoke-DaemonLegacyCleanup -Headers @{ Authorization = 'x' } -Live $liveSet -State $stateSet
+    Test-That 'it reports how many topics were cleared' { $n -eq 27 }
+    Test-That 'the live sessions are passed to the sweep' {
+        ($script:SweptTopics -contains 'sess-a') -and ($script:SweptTopics -contains 'sess-b')
+    }
+    Test-That 'live sessions are dropped from state so they republish' {
+        -not $stateSet.ContainsKey('sess-a') -and -not $stateSet.ContainsKey('sess-b')
+    }
+    Test-That 'a session that is not live is left in state' { $stateSet.ContainsKey('sess-dead') }
+    Test-That 'a marker is written' { Test-Path -LiteralPath $cleanupMarker }
+
+    # Second run must be a complete no-op, or every daemon start would blow away the
+    # cards of whatever is running.
+    $stateSet2 = @{ 'sess-a' = [pscustomobject]@{ Offset = 10 } }
+    $script:SweptTopics = @()
+    $n2 = Invoke-DaemonLegacyCleanup -Headers @{ Authorization = 'x' } -Live $liveSet -State $stateSet2
+    Test-That 'a second run does nothing' { $n2 -eq -1 -and $script:SweptTopics.Count -eq 0 }
+    Test-That 'and leaves state untouched' { $stateSet2.ContainsKey('sess-a') }
+}
+finally {
+    $script:DaemonConfig.LegacyCleanupMarker = $origMarker
+    Remove-Item -LiteralPath $cleanupMarker -Force -ErrorAction SilentlyContinue
+}
+
 Remove-Item -LiteralPath $testLogFile -Force -ErrorAction SilentlyContinue
 
 Write-Host ''

@@ -1,11 +1,11 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-    Regression tests for Live Verbose toggle provisioning.
+    Regression tests for Detailed activity toggle provisioning.
 
 .DESCRIPTION
     The one guarantee that matters here: Initialize-CopilotVerboseToggle must never
-    reset the user's Live Verbose choice. Home Assistant restores a storage-backed
+    reset the user's Detailed activity choice. Home Assistant restores a storage-backed
     input_boolean across a restart (verified against a real core restart), so the
     daemon only has to ensure the helper exists - and must never delete+recreate one
     that already does, because that silently flips the toggle back to Off.
@@ -45,7 +45,7 @@ function Test-That {
 $script:WsLog = @()
 $script:MockHelpers = @()
 $script:MockHasState = $true
-$script:MockCreatedId = 'copilot_cli_live_verbose'
+$script:MockCreatedId = 'agent_bridge_detailed_activity'
 
 function Invoke-CopilotHaWebSocket {
     param([hashtable[]]$Commands, [int]$TimeoutSeconds = 60)
@@ -70,7 +70,7 @@ function Test-CopilotHelperHasState {
 }
 
 function Reset-Mocks {
-    param([object[]]$Helpers = @(), [bool]$HasState = $true, [string]$CreatedId = 'copilot_cli_live_verbose')
+    param([object[]]$Helpers = @(), [bool]$HasState = $true, [string]$CreatedId = 'agent_bridge_detailed_activity')
     $script:WsLog = @()
     $script:MockHelpers = $Helpers
     $script:MockHasState = $HasState
@@ -82,7 +82,7 @@ function Get-DeleteTargets {
 }
 function Test-Created { @($script:WsLog | Where-Object { $_.Type -eq 'input_boolean/create' }).Count -gt 0 }
 
-$helperId = 'copilot_cli_live_verbose'
+$helperId = 'agent_bridge_detailed_activity'
 $present = @([pscustomobject]@{ id = $helperId })
 
 # --- existing helper with a state (steady state) -----------------------------
@@ -117,11 +117,70 @@ Test-That 'the real helper id is never deleted' { @(Get-DeleteTargets) -notconta
 # to a *_2 id because the helper really existed. The stray must be removed and the
 # original left intact.
 Write-Host '--- a de-duplicated create removes only the stray, not the original ---'
-Reset-Mocks -Helpers @() -HasState $true -CreatedId 'copilot_cli_live_verbose_2'
+Reset-Mocks -Helpers @() -HasState $true -CreatedId 'agent_bridge_detailed_activity_2'
 $r = Initialize-CopilotVerboseToggle
 Test-That 'it returns true' { $r }
-Test-That 'the stray _2 helper is deleted' { @(Get-DeleteTargets) -contains 'copilot_cli_live_verbose_2' }
+Test-That 'the stray _2 helper is deleted' { @(Get-DeleteTargets) -contains 'agent_bridge_detailed_activity_2' }
 Test-That 'the real helper is never deleted' { @(Get-DeleteTargets) -notcontains $helperId }
+
+# --- migration off the pre-rename helper -------------------------------------
+# The ids moved from copilot_cli_* to agent_bridge_* because the bridge serves
+# Claude and Codex too. The one thing that must not happen is the user's choice
+# being silently reset, which is exactly what a naive delete+create would do.
+Write-Host '--- the pre-rename helper is migrated with its value intact ---'
+
+$legacyId = 'copilot_cli_live_verbose'
+$script:MockLegacyState = 'off'
+$script:ServiceCalls = @()
+function Get-HomeAssistantHeaders { @{ Authorization = '******' } }
+function Get-HomeAssistantState {
+    param([string]$EntityId, [hashtable]$Headers)
+    if ($EntityId -eq "input_boolean.$legacyId") { return [pscustomobject]@{ state = $script:MockLegacyState } }
+    [pscustomobject]@{ state = 'off' }
+}
+function Invoke-HomeAssistantService {
+    param([string]$Domain, [string]$Service, [hashtable]$Data, [hashtable]$Headers)
+    $script:ServiceCalls += "${Domain}.${Service}:$($Data.entity_id)"
+}
+
+$legacyOnly = @([pscustomobject]@{ id = $legacyId })
+
+$script:MockLegacyState = 'on'
+$script:ServiceCalls = @()
+Reset-Mocks -Helpers $legacyOnly -HasState $true -CreatedId $helperId
+$r = Initialize-CopilotVerboseToggle
+Test-That 'it returns true' { $r }
+Test-That 'the new helper is created' { Test-Created }
+Test-That 'an On value is carried across the rename' {
+    $script:ServiceCalls -contains "input_boolean.turn_on:input_boolean.$helperId"
+}
+Test-That 'the old helper is removed afterwards' { @(Get-DeleteTargets) -contains $legacyId }
+Test-That 'the new helper is not deleted' { @(Get-DeleteTargets) -notcontains $helperId }
+
+$script:MockLegacyState = 'off'
+$script:ServiceCalls = @()
+Reset-Mocks -Helpers $legacyOnly -HasState $true -CreatedId $helperId
+$r = Initialize-CopilotVerboseToggle
+Test-That 'an Off value does not turn the new helper on' {
+    @($script:ServiceCalls | Where-Object { $_ -match 'turn_on' }).Count -eq 0
+}
+Test-That 'the old helper is still removed' { @(Get-DeleteTargets) -contains $legacyId }
+
+# Both present: a half-finished migration must not create a second new helper.
+$script:MockLegacyState = 'on'
+$script:ServiceCalls = @()
+Reset-Mocks -Helpers @([pscustomobject]@{ id = $legacyId }, [pscustomobject]@{ id = $helperId }) -HasState $true -CreatedId $helperId
+$r = Initialize-CopilotVerboseToggle
+Test-That 'a half-migrated pair does not create a duplicate' { -not (Test-Created) }
+Test-That 'and the old helper is cleaned up' { @(Get-DeleteTargets) -contains $legacyId }
+
+# Once migrated, a normal start must not touch anything.
+$script:ServiceCalls = @()
+Reset-Mocks -Helpers $present -HasState $true
+$r = Initialize-CopilotVerboseToggle
+Test-That 'a migrated install is left alone on later starts' {
+    -not (Test-Created) -and @(Get-DeleteTargets).Count -eq 0
+}
 
 Write-Host ''
 if ($script:Failures) {
@@ -129,3 +188,5 @@ if ($script:Failures) {
     exit 1
 }
 Write-Host 'All checks passed' -ForegroundColor Green
+
+

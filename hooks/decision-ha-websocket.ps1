@@ -276,13 +276,14 @@ function Resolve-CopilotMqttEntityIds {
 function Set-CopilotMqttGlobalEntityId {
     <#
         Forces the global session-count sensor onto its deterministic id. Home
-        Assistant derives the id from device+entity name, so the sensor first appears
-        as sensor.copilot_cli_bridge_copilot_sessions; rename it once so the dashboard
-        and any templates can rely on sensor.copilot_cli_sessions.
+        Assistant derives the id from device name plus entity name and ignores
+        object_id, so the sensor first appears as sensor.ai_agent_bridge_sessions;
+        rename it once so the dashboard and any templates can rely on
+        sensor.agent_bridge_sessions.
     #>
-    $target = 'sensor.copilot_cli_sessions'
+    $target = 'sensor.agent_bridge_sessions'
     $reg = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
-    $entry = @($reg) | Where-Object { $_.unique_id -eq 'copilot_cli_sessions' } | Select-Object -First 1
+    $entry = @($reg) | Where-Object { $_.unique_id -eq 'agent_bridge_sessions' } | Select-Object -First 1
     if ($null -eq $entry) { return $false }
     if ([string]$entry.entity_id -eq $target) { return $true }
 
@@ -296,14 +297,14 @@ function Set-CopilotMqttGlobalEntityId {
 
 function Initialize-CopilotVerboseToggle {
     <#
-        Ensures input_boolean.copilot_cli_live_verbose exists, without ever resetting
+        Ensures input_boolean.agent_bridge_detailed_activity exists, without ever resetting
         its value.
 
-        The dashboard's Live Verbose control targets this helper, but nothing else
-        creates it, so a fresh install would render an "Entity not found" row. There
-        is no config flow to hang this off — the bridge is a set of Windows scripts,
-        not a Home Assistant integration — so it self-provisions here instead, using
-        the input_boolean collection API over the WebSocket.
+        The dashboard's Detailed activity control targets this helper, but nothing
+        else creates it, so a fresh install would render an "Entity not found" row.
+        There is no config flow to hang this off — the bridge is a set of Windows
+        scripts, not a Home Assistant integration — so it self-provisions here
+        instead, using the input_boolean collection API over the WebSocket.
 
         Home Assistant restores a storage-backed input_boolean across a restart: a
         toggle left On reads On again once the core comes back (verified against a
@@ -315,7 +316,7 @@ function Initialize-CopilotVerboseToggle {
         Home Assistant is still booting, the helper is already in storage (so
         input_boolean/list returns it) but its state has not materialised yet. The old
         code read that transient no-state as "broken" and recreated the helper — which
-        is exactly what flipped Live Verbose off after a restart. It never deletes a
+        is exactly what flipped the toggle off after a restart. It never deletes a
         stored helper now; the state reappears on its own once Home Assistant finishes
         starting.
 
@@ -325,10 +326,15 @@ function Initialize-CopilotVerboseToggle {
         Returns $true when the helper exists afterwards.
     #>
     param(
-        [string]$HelperId = 'copilot_cli_live_verbose',
-        [string]$Name = 'Copilot CLI Live Verbose',
+        [string]$HelperId = 'agent_bridge_detailed_activity',
+        # Home Assistant slugifies this into the helper id, so the two must stay in
+        # step: change one and you get a second helper rather than a renamed one.
+        [string]$Name = 'Agent Bridge Detailed Activity',
         [string]$Icon = 'mdi:brain',
-        [string]$DisplayName = 'Live Verbose (chain-of-thought)'
+        # Shown on the dashboard and anywhere else Home Assistant names the entity.
+        [string]$DisplayName = 'Detailed activity',
+        # The pre-rename helper, migrated once and then removed.
+        [string]$LegacyHelperId = 'copilot_cli_live_verbose'
     )
 
     # Applied on both paths below - an existing helper and a freshly created one -
@@ -352,7 +358,57 @@ function Initialize-CopilotVerboseToggle {
 
     try {
         $existing = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'input_boolean/list' }))[0]
-        if (@($existing) | Where-Object { [string]$_.id -eq $HelperId }) {
+        $hasCurrent = [bool](@($existing) | Where-Object { [string]$_.id -eq $HelperId })
+        $legacy = @($existing) | Where-Object { [string]$_.id -eq $LegacyHelperId } | Select-Object -First 1
+
+        # One-time migration off the pre-rename helper. The value has to be carried
+        # across by hand: creating the new helper gives it the default Off, and simply
+        # deleting the old one would throw away a deliberate choice. That is the same
+        # silent reset this function already exists to prevent, so it is read first
+        # and re-applied after.
+        if ($null -ne $legacy) {
+            $wasOn = $false
+            try {
+                $legacyState = Get-HomeAssistantState -EntityId "input_boolean.$LegacyHelperId" -Headers (Get-HomeAssistantHeaders)
+                $wasOn = ([string]$legacyState.state -eq 'on')
+            }
+            catch {
+                # Unreadable old state: treat as off rather than guessing on.
+            }
+
+            if (-not $hasCurrent) {
+                $migrated = (Invoke-CopilotHaWebSocket -Commands @(@{
+                    type = 'input_boolean/create'; name = $Name; icon = $Icon
+                }))[0]
+                if ([string]$migrated.id -ne $HelperId) {
+                    Write-Warning "Migrated toggle came back as '$($migrated.id)', expected '$HelperId'; leaving the old helper in place."
+                    return $false
+                }
+                $hasCurrent = $true
+            }
+
+            if ($wasOn -and (Test-CopilotHelperHasState -EntityId "input_boolean.$HelperId")) {
+                try {
+                    Invoke-HomeAssistantService -Domain 'input_boolean' -Service 'turn_on' `
+                        -Headers (Get-HomeAssistantHeaders) -Data @{ entity_id = "input_boolean.$HelperId" }
+                }
+                catch {
+                    Write-Warning "Could not carry the toggle's On state across the rename; set it again on the dashboard."
+                }
+            }
+
+            try {
+                [void](Invoke-CopilotHaWebSocket -Commands @(@{
+                    type = 'input_boolean/delete'; input_boolean_id = $LegacyHelperId
+                }))
+            }
+            catch { }
+
+            & $applyDisplayName
+            return $true
+        }
+
+        if ($hasCurrent) {
             # The helper is in storage. Never delete it: its value - including one Home
             # Assistant restored across a restart - must be preserved. A missing state
             # here means Home Assistant is still starting, not that the helper is
@@ -390,7 +446,7 @@ function Initialize-CopilotVerboseToggle {
 
         # Give it a harness-agnostic display name without renaming the helper itself:
         # the entity_id is derived from the helper's name, and the dashboard and the
-        # daemon both address it as input_boolean.copilot_cli_live_verbose.
+        # daemon both address it as input_boolean.agent_bridge_detailed_activity.
         & $applyDisplayName
 
         return $true
@@ -427,7 +483,7 @@ function Remove-CopilotVerboseToggle {
         Deletes the verbose toggle helper. Used by uninstall so the bridge does not
         leave a dead control behind in Home Assistant.
     #>
-    param([string]$HelperId = 'copilot_cli_live_verbose')
+    param([string]$HelperId = 'agent_bridge_detailed_activity')
 
     $existing = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'input_boolean/list' }))[0]
     if (-not (@($existing) | Where-Object { [string]$_.id -eq $HelperId })) { return $false }
@@ -443,13 +499,13 @@ function Set-CopilotMqttUpdateEntityIds {
         Forces the update entity and its install button onto deterministic ids.
 
         Home Assistant builds an MQTT entity id from the device name plus the entity
-        name, so these first appear as update.copilot_cli_bridge_bridge_update and
-        button.copilot_cli_bridge_install_bridge_update. The daemon reads the button
+        name, so these first appear as update.agent_bridge_bridge_update and
+        button.agent_bridge_install_bridge_update. The daemon reads the button
         by id on every reconcile, so it has to be predictable.
     #>
     $wanted = @{
-        'copilot_cli_update'         = 'update.copilot_cli_update'
-        'copilot_cli_install_update' = 'button.copilot_cli_install_update'
+        'agent_bridge_update'         = 'update.agent_bridge_update'
+        'agent_bridge_install_update' = 'button.agent_bridge_install_update'
     }
 
     $registry = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
@@ -479,17 +535,17 @@ function Set-CopilotMqttNewSessionEntityIds {
 
         Same reason as the update entities: Home Assistant builds an MQTT entity id
         from device name plus entity name and ignores object_id, so these would
-        otherwise appear as text.copilot_cli_bridge_new_session_prompt and friends.
+        otherwise appear as text.agent_bridge_new_session_prompt and friends.
         The daemon reads all four by id on every reconcile, and the generated
         dashboard references them literally, so they have to be predictable.
     #>
     $wanted = @{
-        'copilot_cli_new_prompt'         = 'text.copilot_cli_new_prompt'
-        'copilot_cli_new_workspace'      = 'select.copilot_cli_new_workspace'
-        'copilot_cli_new_profile'        = 'select.copilot_cli_new_profile'
-        'copilot_cli_new_resume'         = 'select.copilot_cli_new_resume'
-        'copilot_cli_new_session'        = 'button.copilot_cli_new_session'
-        'copilot_cli_new_session_result' = 'sensor.copilot_cli_new_session_result'
+        'agent_bridge_new_prompt'         = 'text.agent_bridge_new_prompt'
+        'agent_bridge_new_workspace'      = 'select.agent_bridge_new_workspace'
+        'agent_bridge_new_profile'        = 'select.agent_bridge_new_profile'
+        'agent_bridge_new_resume'         = 'select.agent_bridge_new_resume'
+        'agent_bridge_new_session'        = 'button.agent_bridge_new_session'
+        'agent_bridge_new_session_result' = 'sensor.agent_bridge_new_session_result'
     }
 
     $registry = (Invoke-CopilotHaWebSocket -Commands @(@{ type = 'config/entity_registry/list' }))[0]
@@ -519,9 +575,9 @@ function Save-CopilotSessionDashboard {
 
         The dashboard is fully generated from the live session list, so it is rebuilt
         whenever a session appears or exits rather than hand-edited. It has a control
-        section (the live-session count sensor and the chain-of-thought toggle) and one
-        card per live session showing status, activity, the decision selector and the
-        reply box.
+        section (the session summary with its detailed-activity toggle, the update
+        row, and the new-session card) and one card per live session showing status,
+        activity, the decision selector and the reply box.
 
         Live count and pending-decision count are rendered as Jinja templates over the
         exact entity ids, so they stay current between rebuilds as turn state and
@@ -532,7 +588,7 @@ function Save-CopilotSessionDashboard {
         [AllowEmptyCollection()]
         [object[]]$Sessions,
 
-        [string]$VerboseToggle = 'input_boolean.copilot_cli_live_verbose',
+        [string]$VerboseToggle = 'input_boolean.agent_bridge_detailed_activity',
 
         # Whether to show the Agency profile row on the new-session card.
         [switch]$IncludeProfile,
@@ -544,11 +600,11 @@ function Save-CopilotSessionDashboard {
     $decisionEntities = @($Sessions | ForEach-Object { "select.$($_.Node)_decision" })
     $decisionList = ($decisionEntities | ForEach-Object { "'$_'" }) -join ','
 
-    $liveTemplate = "{{ states('sensor.copilot_cli_sessions') }}"
+    $liveTemplate = "{{ states('sensor.agent_bridge_sessions') }}"
     $pendingTemplate = "{% set dc = [$decisionList] %}{{ dc | map('states') | reject('in',['Idle','unavailable','unknown','']) | list | count }}"
     # The installed version comes from the update entity, which the daemon always
     # publishes, so the card shows what is running without another moving part.
-    $installedTemplate = "{{ state_attr('update.copilot_cli_update', 'installed_version') or '?' }}"
+    $installedTemplate = "{{ state_attr('update.agent_bridge_update', 'installed_version') or '?' }}"
 
     $controlMarkdown = @{
         type = 'markdown'
@@ -557,15 +613,24 @@ function Save-CopilotSessionDashboard {
             ''
             "**Live sessions:** $liveTemplate &bull; **Pending decisions:** $pendingTemplate &bull; **Bridge** $installedTemplate"
             ''
-            'Turn on *Live Verbose* to stream each session''s reasoning and every tool call.'
+            'Turn on *Detailed activity* to stream each session''s reasoning and every tool call.'
         ) -join "`n"
     }
 
-    $toggleCard = @{
-        type = 'entities'
-        entities = @(
-            @{ entity = $VerboseToggle; name = 'Live Verbose (chain-of-thought)' }
-            @{ entity = 'sensor.copilot_cli_sessions'; name = 'Live sessions' }
+    # The summary and its one toggle are stacked into a single card rather than left
+    # as two. They are the same thing - what is running, and how much of it to show -
+    # and the toggle had been sharing a card with a "Live sessions" row that repeated
+    # the count printed directly above it.
+    $agentSessionsCard = @{
+        type = 'vertical-stack'
+        cards = @(
+            $controlMarkdown
+            @{
+                type = 'entities'
+                entities = @(
+                    @{ entity = $VerboseToggle; name = 'Detailed activity' }
+                )
+            }
         )
     }
 
@@ -574,13 +639,13 @@ function Save-CopilotSessionDashboard {
     # because an entities row has no condition of its own.
     $updateCard = @{
         type = 'conditional'
-        conditions = @(@{ entity = 'update.copilot_cli_update'; state = 'on' })
+        conditions = @(@{ entity = 'update.agent_bridge_update'; state = 'on' })
         card = @{
             type = 'entities'
             title = 'Bridge update available'
             entities = @(
-                @{ entity = 'update.copilot_cli_update'; name = 'Version' }
-                @{ entity = 'button.copilot_cli_install_update'; name = 'Install now' }
+                @{ entity = 'update.agent_bridge_update'; name = 'Version' }
+                @{ entity = 'button.agent_bridge_install_update'; name = 'Install now' }
             )
         }
     }
@@ -589,21 +654,21 @@ function Save-CopilotSessionDashboard {
     # Resume first: it decides whether the rows under it even apply. Defaults to
     # "New session", so the common case reads top-to-bottom as a fresh launch.
     if ($IncludeResume) {
-        $newSessionRows += @{ entity = 'select.copilot_cli_new_resume'; name = 'Resume' }
+        $newSessionRows += @{ entity = 'select.agent_bridge_new_resume'; name = 'Resume' }
     }
-    $newSessionRows += @{ entity = 'select.copilot_cli_new_workspace'; name = 'Workspace' }
+    $newSessionRows += @{ entity = 'select.agent_bridge_new_workspace'; name = 'Workspace' }
     # The profile row is only meaningful when Agency is the launcher, so it is left
     # out entirely rather than shown as a control that does nothing.
     if ($IncludeProfile) {
-        $newSessionRows += @{ entity = 'select.copilot_cli_new_profile'; name = 'Profile' }
+        $newSessionRows += @{ entity = 'select.agent_bridge_new_profile'; name = 'Profile' }
     }
     # Launch sits directly under the selectors, because they all carry a default and
     # a launch therefore needs no input at all - open the card, press Launch. The
     # opening prompt is genuinely optional and goes last so it stays out of that path.
     $newSessionRows += @(
-        @{ entity = 'button.copilot_cli_new_session'; name = 'Launch' }
-        @{ entity = 'sensor.copilot_cli_new_session_result'; name = 'Last launch' }
-        @{ entity = 'text.copilot_cli_new_prompt'; name = 'Opening prompt (optional)' }
+        @{ entity = 'button.agent_bridge_new_session'; name = 'Launch' }
+        @{ entity = 'sensor.agent_bridge_new_session_result'; name = 'Last launch' }
+        @{ entity = 'text.agent_bridge_new_prompt'; name = 'Opening prompt (optional)' }
     )
 
     # Starting a new session. Placed with the controls rather than among the session
@@ -617,7 +682,7 @@ function Save-CopilotSessionDashboard {
     }
 
     # The control panel is a plain card pair at the top of the masonry flow.
-    $controlCards = @($controlMarkdown, $toggleCard, $updateCard, $newSessionCard)
+    $controlCards = @($agentSessionsCard, $updateCard, $newSessionCard)
 
     $sessionSections = foreach ($session in $Sessions) {
         $node = $session.Node
@@ -689,7 +754,7 @@ ha-card {
 
         # The collapsed card always carries the whole thing: the full question when one
         # is waiting, otherwise the full text of the last response. The expander holds
-        # only supporting detail - the model's reasoning when Live Verbose is on, and
+        # only supporting detail - the model's reasoning when Detailed activity is on, and
         # the recent activity trail otherwise - so opening it is never required to read
         # what was actually asked or answered.
         $header = @{
@@ -939,3 +1004,5 @@ function Set-CopilotMqttEntityIds {
 
     $targets
 }
+
+

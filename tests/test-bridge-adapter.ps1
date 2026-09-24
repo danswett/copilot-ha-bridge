@@ -78,7 +78,7 @@ Reset-Calls
 $script:ProbeResult = [pscustomobject]@{ state = 'idle' }
 $existed = Confirm-BridgeSessionEntities -SessionId 'sess-1' -SessionName 'S' -Machine 'M' -Headers $headers
 Test-That 'existing entities are not republished' { $existed -and $script:Calls.Publish.Count -eq 0 -and $script:Calls.EntityIds.Count -eq 0 }
-Test-That 'the default probe is the status sensor' { $script:Calls.Probed[0] -match '^sensor\.copilot_.*_status$' }
+Test-That 'the default probe is the status sensor' { $script:Calls.Probed[0] -match '^sensor\.agent_bridge_.*_status$' }
 Reset-Calls
 $script:ProbeResult = $null
 $existed = Confirm-BridgeSessionEntities -SessionId 'sess-2' -SessionName 'S' -Machine 'M' -Headers $headers

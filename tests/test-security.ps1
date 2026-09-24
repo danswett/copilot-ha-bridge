@@ -135,13 +135,13 @@ Test-That 'printable text is preserved unchanged' {
 
 Write-Host '--- MQTT node ids stay distinct for degenerate ids and stable for real ones ---'
 Test-That 'a real UUID node id is unchanged by the hardening' {
-    (Get-CopilotMqttNodeId -SessionId '0f5c1a2e-9b44-4d31-8c77-2a1f6b3e0d55') -eq 'copilot_0f5c1a2e9b444d31'
+    (Get-CopilotMqttNodeId -SessionId '0f5c1a2e-9b44-4d31-8c77-2a1f6b3e0d55') -eq 'agent_bridge_0f5c1a2e9b444d31'
 }
 Test-That 'two distinct all-symbol ids do not collide on one node' {
     (Get-CopilotMqttNodeId -SessionId '###') -ne (Get-CopilotMqttNodeId -SessionId '@@@')
 }
 Test-That 'a degenerate id still yields a valid node id' {
-    (Get-CopilotMqttNodeId -SessionId '///') -match '^copilot_[a-z0-9]+$'
+    (Get-CopilotMqttNodeId -SessionId '///') -match '^agent_bridge_[a-z0-9]+$'
 }
 
 Write-Host '--- token handling ---'
@@ -163,6 +163,60 @@ else {
             -not (Select-String -LiteralPath $path -SimpleMatch -Pattern $token -Quiet)
         }
     }
+}
+
+Write-Host '--- the legacy entity sweep clears the old retained topics ---'
+# Renaming a unique_id does not replace an MQTT entity; the retained discovery
+# config has to be cleared or Home Assistant keeps the old one forever, sitting
+# unavailable next to its replacement.
+$script:SweepMsgs = @()
+function Publish-CopilotMqttMessage {
+    param([string]$Topic, [AllowEmptyString()][string]$Payload, [hashtable]$Headers, [switch]$Retain)
+    $script:SweepMsgs += [pscustomobject]@{ Topic = $Topic; Payload = $Payload; Retain = $Retain.IsPresent }
+}
+
+$script:SweepMsgs = @()
+$sweepHeaders = @{ Authorization = '******' }
+$cleared = Clear-CopilotLegacyMqttEntities -Headers $sweepHeaders -SessionIds @('0f5c1a2e-9b44-4d31-8c77-2a1f6b3e0d55')
+
+Test-That 'it reports what it cleared' { $cleared -eq $script:SweepMsgs.Count }
+Test-That 'every payload is empty, which is what removes a retained config' {
+    @($script:SweepMsgs | Where-Object { $_.Payload -ne '' }).Count -eq 0
+}
+Test-That 'every clear is retained, or the removal would not stick' {
+    @($script:SweepMsgs | Where-Object { -not $_.Retain }).Count -eq 0
+}
+Test-That 'the old bridge-wide topics are cleared' {
+    $t = @($script:SweepMsgs | ForEach-Object { $_.Topic })
+    ($t -contains 'homeassistant/update/copilot_cli_bridge/update/config') -and
+    ($t -contains 'homeassistant/button/copilot_cli_bridge/install_update/config') -and
+    ($t -contains 'homeassistant/sensor/copilot_cli_global/sessions/config') -and
+    ($t -contains 'homeassistant/select/copilot_cli_bridge/new_workspace/config')
+}
+Test-That 'the old per-session topics are cleared for a live session' {
+    $t = @($script:SweepMsgs | ForEach-Object { $_.Topic })
+    ($t -contains 'homeassistant/select/copilot_0f5c1a2e9b444d31/decision/config') -and
+    ($t -contains 'homeassistant/text/copilot_0f5c1a2e9b444d31/reply/config') -and
+    ($t -contains 'homeassistant/sensor/copilot_0f5c1a2e9b444d31/status/config') -and
+    ($t -contains 'homeassistant/button/copilot_0f5c1a2e9b444d31/submit/config')
+}
+Test-That 'the per-field dropdown topics are cleared too' {
+    $t = @($script:SweepMsgs | ForEach-Object { $_.Topic })
+    @(1..4 | Where-Object { $t -contains "homeassistant/select/copilot_0f5c1a2e9b444d31/f$_/config" }).Count -eq 4
+}
+Test-That 'it never touches a new-style agent_bridge topic' {
+    @($script:SweepMsgs | Where-Object { $_.Topic -match '/agent_bridge' }).Count -eq 0
+}
+Test-That 'the legacy node id is derived independently of the current one' {
+    (Get-CopilotLegacyMqttNodeId -SessionId '0f5c1a2e-9b44-4d31-8c77-2a1f6b3e0d55') -eq 'copilot_0f5c1a2e9b444d31' -and
+    (Get-CopilotMqttNodeId -SessionId '0f5c1a2e-9b44-4d31-8c77-2a1f6b3e0d55') -eq 'agent_bridge_0f5c1a2e9b444d31'
+}
+
+$script:SweepMsgs = @()
+[void](Clear-CopilotLegacyMqttEntities -Headers $sweepHeaders -SessionIds @())
+Test-That 'with no live sessions only the bridge-wide topics are cleared' {
+    @($script:SweepMsgs | Where-Object { $_.Topic -match '/copilot_[0-9a-f]{8}' }).Count -eq 0 -and
+    $script:SweepMsgs.Count -gt 0
 }
 
 Write-Host ''

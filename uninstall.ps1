@@ -68,7 +68,7 @@ elseif ($ClearEntities) {
         # The daemon creates these two; without removing them Home Assistant keeps a
         # dead dashboard and an orphaned toggle after everything else is gone.
         try {
-            if (Remove-CopilotVerboseToggle) { Write-Host '    removed the Live Verbose toggle' }
+            if (Remove-CopilotVerboseToggle) { Write-Host '    removed the Detailed activity toggle' }
         }
         catch { Write-Warning "Could not remove the verbose toggle: $($_.Exception.Message)" }
 

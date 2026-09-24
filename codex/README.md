@@ -94,7 +94,7 @@ reports `approval: never` regardless of `approval_policy`, because it has no way
 ask.
 
 **Chain-of-thought is wired and verified.** The reducer reads the rollout transcript
-for reasoning items, gated on the same **Live Verbose** toggle as the other adapters.
+for reasoning items, gated on the same **Detailed activity** toggle as the other adapters.
 
 Reasoning is written twice per turn, and the reducer reads either shape:
 
@@ -132,3 +132,4 @@ retires; it needs the bridge installed and is not part of CI.
 
 Removes the plugin, the marketplace registration and the adapter. Trust entries under
 `[hooks.state]` are left alone; they are harmless and Codex prunes them itself.
+

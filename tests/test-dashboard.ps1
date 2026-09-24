@@ -53,16 +53,52 @@ Test-That 'the view path stays decision (URL slug unchanged)' { $cfg.views[0].pa
 Test-That 'it is saved to the copilot-decisions slug' { $script:SavedUrlPath -eq $script:DecisionBridgeConfig.DashboardUrlPath }
 
 Write-Host '--- the control card summarises sessions and the installed version ---'
-$control = @($cfg.views[0].cards | Where-Object { $_.type -eq 'markdown' -and $_.content -match 'Agent sessions' })[0]
+# The summary and its toggle are one stacked card now, so the markdown lives a level
+# down rather than directly among the view's cards.
+$agentCard = @($cfg.views[0].cards | Where-Object {
+    $_.type -eq 'vertical-stack' -and @($_.cards | Where-Object { $_.type -eq 'markdown' -and $_.content -match 'Agent sessions' }).Count -gt 0
+})[0]
+Test-That 'the agent sessions card exists' { $null -ne $agentCard }
+$control = @($agentCard.cards | Where-Object { $_.type -eq 'markdown' })[0]
 Test-That 'the control markdown card exists' { $null -ne $control }
-Test-That 'it shows the live session count' { $control.content.Contains("states('sensor.copilot_cli_sessions')") }
+Test-That 'it shows the live session count' { $control.content.Contains("states('sensor.agent_bridge_sessions')") }
 Test-That 'it shows the installed bridge version from the update entity' {
-    $control.content.Contains("state_attr('update.copilot_cli_update', 'installed_version')") -and
+    $control.content.Contains("state_attr('update.agent_bridge_update', 'installed_version')") -and
     $control.content.Contains('**Bridge**')
 }
 
+Write-Host '--- the detailed-activity toggle lives in that card ---'
+$toggleRows = @($agentCard.cards | Where-Object { $_.type -eq 'entities' } | ForEach-Object { $_.entities })
+Test-That 'the toggle is inside the agent sessions card' {
+    @($toggleRows | Where-Object { $_.entity -eq 'input_boolean.agent_bridge_detailed_activity' }).Count -eq 1
+}
+Test-That 'it is labelled Detailed activity, not Live Verbose' {
+    ($toggleRows | Where-Object { $_.entity -eq 'input_boolean.agent_bridge_detailed_activity' }).name -eq 'Detailed activity'
+}
+Test-That 'the markdown refers to the toggle by its new name' {
+    $control.content -match 'Detailed activity' -and $control.content -notmatch 'Live Verbose'
+}
+Test-That 'the toggle keeps its original entity id for compatibility' {
+    @($toggleRows | Where-Object { $_.entity -eq 'input_boolean.agent_bridge_detailed_activity' }).Count -eq 1
+}
+
+Write-Host '--- the duplicate session counter is gone ---'
+# The count is printed in the markdown above, so a sensor row repeating it was noise.
+$allRows = @($cfg.views[0].cards | ForEach-Object {
+    if ($_.type -eq 'vertical-stack') { $_.cards | Where-Object { $_.type -eq 'entities' } | ForEach-Object { $_.entities } }
+    elseif ($_.type -eq 'entities') { $_.entities }
+})
+Test-That 'no card repeats the live-session sensor as a row' {
+    @($allRows | Where-Object { $_.entity -eq 'sensor.agent_bridge_sessions' }).Count -eq 0
+}
+Test-That 'there is no longer a standalone toggle card beside the summary' {
+    @($cfg.views[0].cards | Where-Object {
+        $_.type -eq 'entities' -and @($_.entities | Where-Object { $_.entity -eq 'input_boolean.agent_bridge_detailed_activity' }).Count -gt 0
+    }).Count -eq 0
+}
+
 Write-Host '--- a live session produces a card ---'
-Test-That 'the control cards plus a session card are present' { @($cfg.views[0].cards).Count -ge 4 }
+Test-That 'the control cards plus a session card are present' { @($cfg.views[0].cards).Count -ge 3 }
 
 Write-Host ''
 if ($script:Failures) {
@@ -70,3 +106,4 @@ if ($script:Failures) {
     exit 1
 }
 Write-Host 'All checks passed' -ForegroundColor Green
+

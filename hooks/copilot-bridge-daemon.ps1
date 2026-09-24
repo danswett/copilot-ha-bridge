@@ -42,13 +42,16 @@ $ErrorActionPreference = 'Stop'
 
 $script:DaemonConfig = @{
     MutexName = 'Local\CopilotBridgeDaemon'
-    VerboseToggle = 'input_boolean.copilot_cli_live_verbose'
+    VerboseToggle = 'input_boolean.agent_bridge_detailed_activity'
     LogFile = (Join-Path $env:TEMP 'copilot-bridge-daemon.log')
     StateFile = (Join-Path $env:TEMP 'copilot-bridge-daemon-state.json')
     # Written by the self-updater when an install finishes, read by whichever daemon
     # is running next, so a press of the install button ends in a visible
     # "updated to X" (or a failure) notification.
     UpdateOutcomeFile = (Join-Path $env:TEMP 'copilot-bridge-update-outcome.json')
+    # Written once the pre-rename entities have been swept, so the sweep does not
+    # repeat on every daemon start.
+    LegacyCleanupMarker = (Join-Path $env:TEMP 'copilot-bridge-legacy-cleanup.json')
     # Cap how much transcript is read in one pass, so a session that produced a huge
     # burst cannot stall the loop.
     MaxTailBytes = 512000
@@ -1274,7 +1277,7 @@ function Sync-DaemonUpdateStatus {
     # start time rather than simply ignoring the first value seen means a press made
     # moments after a restart still counts, instead of being silently swallowed.
     try {
-        $button = Get-HomeAssistantState -EntityId 'button.copilot_cli_install_update' -Headers $Headers
+        $button = Get-HomeAssistantState -EntityId 'button.agent_bridge_install_update' -Headers $Headers
         $press = [string]$button.state
         if ($press -in @('unknown', 'unavailable', '')) { return }
         if ($press -eq $script:DaemonUpdateLastPress) { return }
@@ -1369,11 +1372,11 @@ function Set-DaemonNewSessionDefaults {
         $default = Get-BridgeDefaultWorkspaceLabel
         if (-not [string]::IsNullOrWhiteSpace($default)) {
             try {
-                $current = [string](Get-HomeAssistantState -EntityId 'select.copilot_cli_new_workspace' -Headers $Headers).state
+                $current = [string](Get-HomeAssistantState -EntityId 'select.agent_bridge_new_workspace' -Headers $Headers).state
                 $valid = @($Workspaces | ForEach-Object { [string]$_.Label })
                 if ($current -in $stale -or $valid -notcontains $current) {
                     Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers `
-                        -Data @{ entity_id = 'select.copilot_cli_new_workspace'; option = $default }
+                        -Data @{ entity_id = 'select.agent_bridge_new_workspace'; option = $default }
                 }
             }
             catch { }
@@ -1384,10 +1387,10 @@ function Set-DaemonNewSessionDefaults {
         $default = Get-BridgeDefaultAgencyProfile
         if (-not [string]::IsNullOrWhiteSpace($default)) {
             try {
-                $current = [string](Get-HomeAssistantState -EntityId 'select.copilot_cli_new_profile' -Headers $Headers).state
+                $current = [string](Get-HomeAssistantState -EntityId 'select.agent_bridge_new_profile' -Headers $Headers).state
                 if ($current -in $stale -or $Profiles -notcontains $current) {
                     Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers `
-                        -Data @{ entity_id = 'select.copilot_cli_new_profile'; option = $default }
+                        -Data @{ entity_id = 'select.agent_bridge_new_profile'; option = $default }
                 }
             }
             catch { }
@@ -1397,10 +1400,10 @@ function Set-DaemonNewSessionDefaults {
     # The prompt is optional, so it should look empty and inviting rather than
     # reading "unknown" as though something were wrong.
     try {
-        $current = [string](Get-HomeAssistantState -EntityId 'text.copilot_cli_new_prompt' -Headers $Headers).state
+        $current = [string](Get-HomeAssistantState -EntityId 'text.agent_bridge_new_prompt' -Headers $Headers).state
         if ($current -in @('unknown', 'unavailable')) {
             Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers `
-                -Data @{ entity_id = 'text.copilot_cli_new_prompt'; value = $script:DaemonConfig.ReplyBlankValue }
+                -Data @{ entity_id = 'text.agent_bridge_new_prompt'; value = $script:DaemonConfig.ReplyBlankValue }
         }
     }
     catch { }
@@ -1409,11 +1412,11 @@ function Set-DaemonNewSessionDefaults {
     # session drops off the list, so a stale pick can never launch something
     # unexpected on the next press.
     try {
-        $current = [string](Get-HomeAssistantState -EntityId 'select.copilot_cli_new_resume' -Headers $Headers).state
+        $current = [string](Get-HomeAssistantState -EntityId 'select.agent_bridge_new_resume' -Headers $Headers).state
         $valid = @($script:CopilotMqttNewSessionOption) + @($Resumable | ForEach-Object { [string]$_.Label })
         if ($current -in $stale -or $valid -notcontains $current) {
             Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers `
-                -Data @{ entity_id = 'select.copilot_cli_new_resume'; option = $script:CopilotMqttNewSessionOption }
+                -Data @{ entity_id = 'select.agent_bridge_new_resume'; option = $script:CopilotMqttNewSessionOption }
         }
     }
     catch { }
@@ -1471,7 +1474,7 @@ function Sync-DaemonNewSession {
     Set-DaemonNewSessionDefaults -Headers $Headers -Workspaces $workspaces -Profiles $profiles -Resumable $resumable
 
     try {
-        $button = Get-HomeAssistantState -EntityId 'button.copilot_cli_new_session' -Headers $Headers
+        $button = Get-HomeAssistantState -EntityId 'button.agent_bridge_new_session' -Headers $Headers
         $press = [string]$button.state
     }
     catch {
@@ -1496,7 +1499,7 @@ function Sync-DaemonNewSession {
 
     $label = ''
     try {
-        $selected = Get-HomeAssistantState -EntityId 'select.copilot_cli_new_workspace' -Headers $Headers
+        $selected = Get-HomeAssistantState -EntityId 'select.agent_bridge_new_workspace' -Headers $Headers
         $label = [string]$selected.state
     }
     catch { }
@@ -1516,7 +1519,7 @@ function Sync-DaemonNewSession {
 
     $prompt = ''
     try {
-        $promptState = Get-HomeAssistantState -EntityId 'text.copilot_cli_new_prompt' -Headers $Headers
+        $promptState = Get-HomeAssistantState -EntityId 'text.agent_bridge_new_prompt' -Headers $Headers
         $prompt = [string]$promptState.state
     }
     catch { }
@@ -1530,7 +1533,7 @@ function Sync-DaemonNewSession {
     if ($launcher -eq 'agency' -and $profiles.Count -gt 0) {
         $profileLabel = ''
         try {
-            $profileState = Get-HomeAssistantState -EntityId 'select.copilot_cli_new_profile' -Headers $Headers
+            $profileState = Get-HomeAssistantState -EntityId 'select.agent_bridge_new_profile' -Headers $Headers
             $profileLabel = [string]$profileState.state
         }
         catch { }
@@ -1554,7 +1557,7 @@ function Sync-DaemonNewSession {
     $resumeSession = $null
     $resumeLabel = ''
     try {
-        $resumeState = Get-HomeAssistantState -EntityId 'select.copilot_cli_new_resume' -Headers $Headers
+        $resumeState = Get-HomeAssistantState -EntityId 'select.agent_bridge_new_resume' -Headers $Headers
         $resumeLabel = [string]$resumeState.state
         if (-not [string]::IsNullOrWhiteSpace($resumeLabel) -and
             $resumeLabel -notin @('unknown', 'unavailable', $script:CopilotMqttNewSessionOption)) {
@@ -1632,7 +1635,7 @@ function Sync-DaemonNewSession {
     if ($prompt) {
         try {
             Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers -Data @{
-                entity_id = 'text.copilot_cli_new_prompt'
+                entity_id = 'text.agent_bridge_new_prompt'
                 value     = $script:DaemonConfig.ReplyBlankValue
             }
         }
@@ -1640,6 +1643,47 @@ function Sync-DaemonNewSession {
             Write-DaemonLog -Message "could not clear the new-session prompt: $($_.Exception.Message)"
         }
     }
+}
+
+function Invoke-DaemonLegacyCleanup {
+    <#
+        Sweeps the entities published under the pre-rename ids, once.
+
+        Two things have to happen together, which is why they live in one function.
+        The old retained discovery configs are cleared, and the live sessions are
+        dropped from persisted state.
+
+        The second is not optional. Clearing a live session's topics deletes its
+        entities, but the state file still records it as published, and
+        Sync-DaemonSessions only publishes sessions it has never seen - so the
+        session would be left with the old entities gone and no new ones created.
+        Dropping the entry makes the next reconcile treat it as new. Nothing is
+        re-streamed, because that path starts the offset at the transcript's current
+        length.
+
+        Returns the number of topics cleared, or -1 when the sweep has already run.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers,
+        [Parameter(Mandatory)][hashtable]$Live,
+        [Parameter(Mandatory)][hashtable]$State
+    )
+
+    if (Test-Path -LiteralPath $script:DaemonConfig.LegacyCleanupMarker) { return -1 }
+
+    $cleared = Clear-CopilotLegacyMqttEntities -Headers $Headers -SessionIds @($Live.Keys)
+
+    $readopted = 0
+    foreach ($sessionId in @($Live.Keys)) {
+        if ($State.ContainsKey($sessionId)) { [void]$State.Remove($sessionId); $readopted++ }
+    }
+
+    [System.IO.File]::WriteAllText(
+        $script:DaemonConfig.LegacyCleanupMarker,
+        (@{ at = [DateTimeOffset]::Now.ToString('o'); cleared = $cleared } | ConvertTo-Json -Compress))
+    Write-DaemonLog -Message "legacy entity cleanup: cleared $cleared retained topic(s), re-publishing $readopted live session(s)"
+
+    $cleared
 }
 
 function Sync-DaemonSessions {
@@ -2040,7 +2084,7 @@ function Sync-DaemonSessions {
 function Update-SessionsForVerbose {
     <#
         Immediately republishes every session's activity to show or hide its reasoning
-        the instant the Live Verbose toggle changes, without waiting for the session to
+        the instant the Detailed activity toggle changes, without waiting for the session to
         produce fresh transcript activity. Reasoning is kept in state regardless of the
         toggle, so turning verbose on re-reveals the last captured reasoning at once and
         turning it off hides it at once.
@@ -2269,12 +2313,23 @@ function Start-BridgeDaemon {
 
     Write-DaemonLog -Message "daemon starting (pid $PID), $($live.Count) live session(s)"
 
-    # Provision the dashboard's Live Verbose helper before anything renders it.
+    # Provision the dashboard's Detailed activity helper before anything renders it.
     if (Initialize-CopilotVerboseToggle) {
         Write-DaemonLog -Message "verbose toggle ready ($($script:DaemonConfig.VerboseToggle))"
     }
     else {
         Write-DaemonLog -Message 'verbose toggle unavailable; streaming defaults to quiet'
+    }
+
+    # Sweep the entities published under the old `copilot_cli_*` / `copilot_<hex>`
+    # ids. Retained discovery configs outlive a rename, so without this the renamed
+    # entities appear alongside their unavailable predecessors rather than replacing
+    # them. Self-guarding, and a no-op once it has run.
+    try {
+        [void](Invoke-DaemonLegacyCleanup -Headers $headers -Live $live -State $state)
+    }
+    catch {
+        Write-DaemonLog -Message "legacy entity cleanup failed: $($_.Exception.Message)"
     }
 
     Clear-CopilotMqttOrphans -Headers $headers -Live $live
@@ -2424,4 +2479,5 @@ if (-not $env:COPILOT_BRIDGE_DAEMON_NORUN) {
         $mutex.Dispose()
     }
 }
+
 

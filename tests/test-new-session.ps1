@@ -367,17 +367,17 @@ Publish-CopilotMqttNewSession -Workspaces @(
 
 function Get-Config { param([string]$Match) ($script:MqttMsgs | Where-Object { $_.Topic -match $Match } | Select-Object -First 1).Payload }
 
-Test-That 'a prompt text entity is published'  { (Get-Config 'text/copilot_cli_bridge/new_prompt/config') -match '"unique_id":"copilot_cli_new_prompt"' }
-Test-That 'a workspace select is published'    { (Get-Config 'select/copilot_cli_bridge/new_workspace/config') -match '"unique_id":"copilot_cli_new_workspace"' }
-Test-That 'a profile select is published'      { (Get-Config 'select/copilot_cli_bridge/new_profile/config') -match '"unique_id":"copilot_cli_new_profile"' }
+Test-That 'a prompt text entity is published'  { (Get-Config 'text/agent_bridge/new_prompt/config') -match '"unique_id":"agent_bridge_new_prompt"' }
+Test-That 'a workspace select is published'    { (Get-Config 'select/agent_bridge/new_workspace/config') -match '"unique_id":"agent_bridge_new_workspace"' }
+Test-That 'a profile select is published'      { (Get-Config 'select/agent_bridge/new_profile/config') -match '"unique_id":"agent_bridge_new_profile"' }
 Test-That 'the profile select offers the profiles' { (Get-Config 'new_profile/config') -match 'work' -and (Get-Config 'new_profile/config') -match 'home' }
-Test-That 'a launch button is published'       { (Get-Config 'button/copilot_cli_bridge/new_session/config') -match '"unique_id":"copilot_cli_new_session"' }
-Test-That 'a resume select is published'       { (Get-Config 'select/copilot_cli_bridge/new_resume/config') -match '"unique_id":"copilot_cli_new_resume"' }
+Test-That 'a launch button is published'       { (Get-Config 'button/agent_bridge/new_session/config') -match '"unique_id":"agent_bridge_new_session"' }
+Test-That 'a resume select is published'       { (Get-Config 'select/agent_bridge/new_resume/config') -match '"unique_id":"agent_bridge_new_resume"' }
 Test-That 'resume defaults to starting fresh'  { (Get-Config 'new_resume/config') -match '"options":\["New session"' }
 Test-That 'the resume list offers the session' { (Get-Config 'new_resume/config') -match 'Fix the thing - alpha' }
-Test-That 'a result sensor is published'       { (Get-Config 'sensor/copilot_cli_bridge/new_session_result/config') -match '"unique_id":"copilot_cli_new_session_result"' }
+Test-That 'a result sensor is published'       { (Get-Config 'sensor/agent_bridge/new_session_result/config') -match '"unique_id":"agent_bridge_new_session_result"' }
 Test-That 'the select offers both workspaces'  { (Get-Config 'new_workspace/config') -match 'alpha' -and (Get-Config 'new_workspace/config') -match 'Beta project' }
-Test-That 'they all land on the bridge device' { (Get-Config 'new_prompt/config') -match '"identifiers":\["copilot_cli_bridge"\]' }
+Test-That 'they all land on the bridge device' { (Get-Config 'new_prompt/config') -match '"identifiers":\["agent_bridge"\]' }
 Test-That 'the prompt box is optimistic (no state topic)' { (Get-Config 'new_prompt/config') -notmatch '"state_topic"' }
 Test-That 'the result sensor does have a state topic' { (Get-Config 'new_session_result/config') -match '"state_topic"' }
 
@@ -450,11 +450,11 @@ function Reset-NewSessionTest {
     $script:DaemonNewSessionLastPress = ''
     $script:DaemonStartedAt = [DateTimeOffset]::Parse('2026-01-01T00:00:00Z')
     $script:HaStates = @{
-        'button.copilot_cli_new_session'   = $Press
-        'select.copilot_cli_new_workspace' = $Workspace
-        'select.copilot_cli_new_profile'   = $ProfileState
-        'select.copilot_cli_new_resume'    = $ResumeState
-        'text.copilot_cli_new_prompt'      = $Prompt
+        'button.agent_bridge_new_session'   = $Press
+        'select.agent_bridge_new_workspace' = $Workspace
+        'select.agent_bridge_new_profile'   = $ProfileState
+        'select.agent_bridge_new_resume'    = $ResumeState
+        'text.agent_bridge_new_prompt'      = $Prompt
     }
 }
 
@@ -638,4 +638,5 @@ if ($script:Failures) {
     exit 1
 }
 Write-Host 'All checks passed' -ForegroundColor Green
+
 

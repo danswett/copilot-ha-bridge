@@ -42,6 +42,10 @@ function Get-CopilotMqttNodeId {
     <#
         A stable, MQTT-safe node id for a session. Discovery topics and object ids
         allow only [a-zA-Z0-9_-], so anything else is stripped.
+
+        Namespaced `agent_bridge_` rather than `copilot_`: the bridge serves Copilot
+        CLI, Claude Code, Codex and MCP clients alike, and calling a Claude session's
+        entities sensor.copilot_... was actively misleading.
     #>
     param(
         [Parameter(Mandatory)]
@@ -61,7 +65,7 @@ function Get-CopilotMqttNodeId {
     if ($clean.Length -gt 16) {
         $clean = $clean.Substring(0, 16)
     }
-    "copilot_$($clean.ToLowerInvariant())"
+    "agent_bridge_$($clean.ToLowerInvariant())"
 }
 
 function Get-CopilotMqttTopics {
@@ -374,7 +378,7 @@ function Publish-CopilotMqttUpdate {
     )
 
     $device = @{
-        identifiers  = @('copilot_cli_bridge')
+        identifiers  = @('agent_bridge')
         name         = 'AI Agent Bridge'
         manufacturer = 'AI CLI bridge'
     }
@@ -382,15 +386,15 @@ function Publish-CopilotMqttUpdate {
 
     $config = @{
         name        = 'Update'
-        unique_id   = 'copilot_cli_update'
-        object_id   = 'copilot_cli_update'
+        unique_id   = 'agent_bridge_update'
+        object_id   = 'agent_bridge_update'
         state_topic = $stateTopic
         device_class = 'firmware'
         icon        = 'mdi:package-up'
         device      = $device
     }
     Publish-CopilotMqttMessage `
-        -Topic "$($script:CopilotMqttConfig.DiscoveryPrefix)/update/copilot_cli_bridge/update/config" `
+        -Topic "$($script:CopilotMqttConfig.DiscoveryPrefix)/update/agent_bridge/update/config" `
         -Payload ($config | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     # Release notes render in the entity's own dialog. They are capped because the
@@ -415,14 +419,14 @@ function Publish-CopilotMqttUpdate {
 
     $button = @{
         name          = 'Install Bridge Update'
-        unique_id     = 'copilot_cli_install_update'
-        object_id     = 'copilot_cli_install_update'
+        unique_id     = 'agent_bridge_install_update'
+        object_id     = 'agent_bridge_install_update'
         command_topic = "$($script:CopilotMqttConfig.TopicRoot)/update/install"
         icon          = 'mdi:download'
         device        = $device
     }
     Publish-CopilotMqttMessage `
-        -Topic "$($script:CopilotMqttConfig.DiscoveryPrefix)/button/copilot_cli_bridge/install_update/config" `
+        -Topic "$($script:CopilotMqttConfig.DiscoveryPrefix)/button/agent_bridge/install_update/config" `
         -Payload ($button | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 }
 
@@ -466,7 +470,7 @@ function Publish-CopilotMqttNewSession {
     )
 
     $device = @{
-        identifiers  = @('copilot_cli_bridge')
+        identifiers  = @('agent_bridge')
         name         = 'AI Agent Bridge'
         manufacturer = 'AI CLI bridge'
     }
@@ -481,27 +485,27 @@ function Publish-CopilotMqttNewSession {
 
     $promptConfig = @{
         name          = 'New session prompt'
-        unique_id     = 'copilot_cli_new_prompt'
-        object_id     = 'copilot_cli_new_prompt'
+        unique_id     = 'agent_bridge_new_prompt'
+        object_id     = 'agent_bridge_new_prompt'
         command_topic = "$root/newsession/prompt/set"
         max           = $script:CopilotMqttConfig.ReplyMaxChars
         mode          = 'text'
         icon          = 'mdi:message-plus-outline'
         device        = $device
     }
-    Publish-CopilotMqttMessage -Topic "$prefix/text/copilot_cli_bridge/new_prompt/config" `
+    Publish-CopilotMqttMessage -Topic "$prefix/text/agent_bridge/new_prompt/config" `
         -Payload ($promptConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     $workspaceConfig = @{
         name          = 'New session workspace'
-        unique_id     = 'copilot_cli_new_workspace'
-        object_id     = 'copilot_cli_new_workspace'
+        unique_id     = 'agent_bridge_new_workspace'
+        object_id     = 'agent_bridge_new_workspace'
         command_topic = "$root/newsession/workspace/set"
         options       = $options
         icon          = 'mdi:folder-open-outline'
         device        = $device
     }
-    Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_workspace/config" `
+    Publish-CopilotMqttMessage -Topic "$prefix/select/agent_bridge/new_workspace/config" `
         -Payload ($workspaceConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     # The Agency profile decides which MCP servers and plugins a session gets, and it
@@ -516,14 +520,14 @@ function Publish-CopilotMqttNewSession {
 
     $profileConfig = @{
         name          = 'New session profile'
-        unique_id     = 'copilot_cli_new_profile'
-        object_id     = 'copilot_cli_new_profile'
+        unique_id     = 'agent_bridge_new_profile'
+        object_id     = 'agent_bridge_new_profile'
         command_topic = "$root/newsession/profile/set"
         options       = $profileOptions
         icon          = 'mdi:account-cog-outline'
         device        = $device
     }
-    Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_profile/config" `
+    Publish-CopilotMqttMessage -Topic "$prefix/select/agent_bridge/new_profile/config" `
         -Payload ($profileConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     # Resume selector. "New session" is always the first option and the default, so
@@ -536,37 +540,37 @@ function Publish-CopilotMqttNewSession {
 
     $resumeConfig = @{
         name          = 'New session resume'
-        unique_id     = 'copilot_cli_new_resume'
-        object_id     = 'copilot_cli_new_resume'
+        unique_id     = 'agent_bridge_new_resume'
+        object_id     = 'agent_bridge_new_resume'
         command_topic = "$root/newsession/resume/set"
         options       = $resumeOptions
         icon          = 'mdi:history'
         device        = $device
     }
-    Publish-CopilotMqttMessage -Topic "$prefix/select/copilot_cli_bridge/new_resume/config" `
+    Publish-CopilotMqttMessage -Topic "$prefix/select/agent_bridge/new_resume/config" `
         -Payload ($resumeConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     $buttonConfig = @{
         name          = 'Start new session'
-        unique_id     = 'copilot_cli_new_session'
-        object_id     = 'copilot_cli_new_session'
+        unique_id     = 'agent_bridge_new_session'
+        object_id     = 'agent_bridge_new_session'
         command_topic = "$root/newsession/start"
         icon          = 'mdi:rocket-launch-outline'
         device        = $device
     }
-    Publish-CopilotMqttMessage -Topic "$prefix/button/copilot_cli_bridge/new_session/config" `
+    Publish-CopilotMqttMessage -Topic "$prefix/button/agent_bridge/new_session/config" `
         -Payload ($buttonConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     $resultTopic = "$root/newsession/result"
     $resultConfig = @{
         name        = 'New session result'
-        unique_id   = 'copilot_cli_new_session_result'
-        object_id   = 'copilot_cli_new_session_result'
+        unique_id   = 'agent_bridge_new_session_result'
+        object_id   = 'agent_bridge_new_session_result'
         state_topic = $resultTopic
         icon        = 'mdi:information-outline'
         device      = $device
     }
-    Publish-CopilotMqttMessage -Topic "$prefix/sensor/copilot_cli_bridge/new_session_result/config" `
+    Publish-CopilotMqttMessage -Topic "$prefix/sensor/agent_bridge/new_session_result/config" `
         -Payload ($resultConfig | ConvertTo-Json -Depth 8 -Compress) -Headers $Headers -Retain
 
     if ($PSBoundParameters.ContainsKey('LastResult')) {
@@ -592,6 +596,87 @@ function Set-CopilotMqttNewSessionResult {
         -Payload $value -Headers $Headers -Retain
 }
 
+function Clear-CopilotLegacyMqttEntities {
+    <#
+        Removes the entities published under the pre-rename `copilot_cli_*` and
+        `copilot_<hex>` ids.
+
+        An MQTT discovery config is retained on the broker, so renaming a unique_id
+        does not replace the old entity - it adds a second one and leaves the first
+        sitting there forever, unavailable and confusing. The retained payload has to
+        be explicitly cleared, which is done by publishing an empty one.
+
+        Only two sets can still exist by the time this runs. The bridge-wide entities,
+        which are a fixed list; and the per-session entities of whatever was live at
+        the moment of the switch, because a session's topics are already cleared when
+        it exits. Historical sessions therefore need no sweep.
+
+        Returns the number of topics cleared.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Headers,
+
+        # Session ids whose legacy per-session topics should also be cleared.
+        [AllowEmptyCollection()]
+        [string[]]$SessionIds = @()
+    )
+
+    $prefix = $script:CopilotMqttConfig.DiscoveryPrefix
+    $topics = @(
+        "$prefix/update/copilot_cli_bridge/update/config"
+        "$prefix/button/copilot_cli_bridge/install_update/config"
+        "$prefix/text/copilot_cli_bridge/new_prompt/config"
+        "$prefix/select/copilot_cli_bridge/new_workspace/config"
+        "$prefix/select/copilot_cli_bridge/new_profile/config"
+        "$prefix/select/copilot_cli_bridge/new_resume/config"
+        "$prefix/button/copilot_cli_bridge/new_session/config"
+        "$prefix/sensor/copilot_cli_bridge/new_session_result/config"
+        "$prefix/sensor/copilot_cli_global/sessions/config"
+    )
+
+    foreach ($sessionId in @($SessionIds)) {
+        $node = Get-CopilotLegacyMqttNodeId -SessionId $sessionId
+        if ([string]::IsNullOrWhiteSpace($node)) { continue }
+        $topics += @(
+            "$prefix/select/$node/decision/config"
+            "$prefix/text/$node/reply/config"
+            "$prefix/sensor/$node/status/config"
+            "$prefix/sensor/$node/activity/config"
+            "$prefix/button/$node/submit/config"
+        )
+        for ($i = 1; $i -le $script:CopilotMqttMaxFields; $i++) {
+            $topics += "$prefix/select/$node/f$i/config"
+        }
+    }
+
+    $cleared = 0
+    foreach ($topic in $topics) {
+        try {
+            Publish-CopilotMqttMessage -Topic $topic -Payload '' -Headers $Headers -Retain
+            $cleared++
+        }
+        catch {
+            # A topic that cannot be cleared is not worth failing a daemon start over.
+        }
+    }
+
+    $cleared
+}
+
+function Get-CopilotLegacyMqttNodeId {
+    <#
+        The node id a session had before the `agent_bridge_` rename. Kept verbatim
+        rather than derived from the current function, so a later change to node
+        naming cannot silently break the cleanup of the old one.
+    #>
+    param([Parameter(Mandatory)][string]$SessionId)
+
+    $clean = ($SessionId -replace '[^a-zA-Z0-9]', '')
+    if ([string]::IsNullOrWhiteSpace($clean)) { return '' }
+    if ($clean.Length -gt 16) { $clean = $clean.Substring(0, 16) }
+    "copilot_$($clean.ToLowerInvariant())"
+}
+
 function Publish-CopilotMqttGlobalStatus {
     <#
         Publishes a single global sensor summarising all live sessions, so the
@@ -612,19 +697,19 @@ function Publish-CopilotMqttGlobalStatus {
         [hashtable]$Headers
     )
 
-    $node = 'copilot_cli_global'
+    $node = 'agent_bridge_global'
     $stateTopic = "$($script:CopilotMqttConfig.TopicRoot)/global/state"
     $attrTopic = "$($script:CopilotMqttConfig.TopicRoot)/global/attr"
 
     $config = @{
         name = 'Sessions'
-        unique_id = 'copilot_cli_sessions'
-        object_id = 'copilot_cli_sessions'
+        unique_id = 'agent_bridge_sessions'
+        object_id = 'agent_bridge_sessions'
         state_topic = $stateTopic
         json_attributes_topic = $attrTopic
         icon = 'mdi:robot-happy'
         device = @{
-            identifiers = @('copilot_cli_bridge')
+            identifiers = @('agent_bridge')
             name = 'AI Agent Bridge'
             manufacturer = 'AI CLI bridge'
         }
@@ -642,7 +727,7 @@ function Publish-CopilotMqttGlobalStatus {
 }
 
 function Get-CopilotMqttGlobalEntityId {
-    'sensor.copilot_cli_sessions'
+    'sensor.agent_bridge_sessions'
 }
 
 function Set-CopilotMqttStatus {
@@ -1104,3 +1189,4 @@ function Clear-CopilotMqttDecision {
         # Non-fatal.
     }
 }
+
