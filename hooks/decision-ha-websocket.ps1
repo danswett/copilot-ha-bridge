@@ -856,6 +856,12 @@ ha-select, mwc-select { width: 100%; }
             }
         }
 
+        # On a multi-field question the per-field dropdowns carry the answer and the
+        # main selector holds only "Cancel request" - so rendering it as another
+        # dropdown put a third thing to fill in exactly where the last field should
+        # be. Relabelling it was not enough: it was still a select you could open, and
+        # it still read as a question. It is a button here instead, sitting with End
+        # session as the secondary action it actually is.
         $cancelCard = @{
             type = 'conditional'
             conditions = @(
@@ -867,10 +873,48 @@ ha-select, mwc-select { width: 100%; }
                 @{ condition = 'state'; entity = "select.${node}_f1"; state_not = 'unavailable' }
             )
             card = @{
-                type = 'entities'
-                show_header_toggle = $false
-                card_mod = @{ style = $selectRowCard }
-                entities = @(@{ entity = $decisionEntity; name = 'Cancel this request'; card_mod = @{ style = $selectRow } })
+                type = 'custom:button-card'
+                name = 'Cancel this request'
+                icon = 'mdi:close-circle-outline'
+                show_state = $false
+                tap_action = @{
+                    action = 'perform-action'
+                    perform_action = 'select.select_option'
+                    target = @{ entity_id = $decisionEntity }
+                    data = @{ option = 'Cancel request' }
+                }
+                styles = @{
+                    card = @(
+                        @{ background = 'none' }
+                        @{ border = 'none' }
+                        @{ 'box-shadow' = 'none' }
+                        @{ height = 'auto' }
+                        @{ padding = '6px 0 0 0' }
+                    )
+                    grid = @(
+                        @{ 'grid-template-areas' = '"i n"' }
+                        @{ 'grid-template-columns' = 'min-content auto' }
+                        @{ 'grid-template-rows' = 'auto' }
+                        @{ 'justify-items' = 'start' }
+                        @{ 'align-items' = 'center' }
+                        @{ 'grid-gap' = '6px' }
+                    )
+                    img_cell = @(
+                        @{ 'justify-self' = 'start' }
+                        @{ margin = '0' }
+                        @{ padding = '0' }
+                    )
+                    icon = @(
+                        @{ color = 'var(--secondary-text-color)' }
+                        @{ width = '17px' }
+                    )
+                    name = @(
+                        @{ 'font-size' = '12px' }
+                        @{ color = 'var(--secondary-text-color)' }
+                        @{ 'justify-self' = 'start' }
+                        @{ 'text-align' = 'left' }
+                    )
+                }
             }
         }
 
@@ -1096,7 +1140,7 @@ ha-card {
         @{
             type = 'vertical-stack'
             card_mod = @{ style = $sessionCardStyle }
-            cards = @($header) + @($fieldCards) + @($answerCard, $cancelCard, $replyCard, $sendStatusCard, $stopCard)
+            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard, $sendStatusCard, $cancelCard, $stopCard)
         }
     }
 

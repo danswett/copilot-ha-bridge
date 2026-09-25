@@ -125,26 +125,40 @@ Test-That 'the header no longer owns the glow' {
 }
 Test-That 'every inner card is transparent so one surface shows through' {
     $inner = @($sessionCard.cards | Where-Object { $_.type -in @('markdown', 'conditional') })
-    $styled = foreach ($c in $inner) {
-        if ($c.type -eq 'conditional') { $c.card.card_mod.style } else { $c.card_mod.style }
+    $opaque = foreach ($c in $inner) {
+        $target = if ($c.type -eq 'conditional') { $c.card } else { $c }
+        if ("$($target.type)" -eq 'custom:button-card') {
+            # A button-card carries its own styles block rather than card-mod.
+            if (@($target.styles.card | Where-Object { $_.ContainsKey('background') -and $_['background'] -eq 'none' }).Count -eq 0) { $target }
+        }
+        elseif ("$($target.card_mod.style)" -notmatch 'background:\s*none') { $target }
     }
-    @($styled | Where-Object { $_ -notmatch 'background:\s*none' }).Count -eq 0
+    @($opaque).Count -eq 0
 }
 
 Write-Host '--- the decision row says what it actually does ---'
 # On a multi-field question the per-field dropdowns carry the answer and this selector
-# offers only "Cancel request" - but it was still labelled "Answer", so it read as one
-# more question to fill in, sitting exactly where the last field should have been.
-$decisionRows = @($sessionCard.cards | Where-Object {
+# offers only "Cancel request". Rendered as a dropdown it was a third thing to fill in,
+# sitting exactly where the last field should have been - reported from the dashboard
+# as "still three things to fill in" even after it had been relabelled.
+$answerRow = @($sessionCard.cards | Where-Object {
     $_.type -eq 'conditional' -and $_.card.type -eq 'entities' -and
     "$($_.card.entities[0].entity)" -match '_decision$'
-})
-Test-That 'there are two variants of the decision row' { $decisionRows.Count -eq 2 }
+})[0]
+$cancelRow = @($sessionCard.cards | Where-Object {
+    $_.type -eq 'conditional' -and $_.card.type -eq 'custom:button-card' -and
+    "$($_.card.name)" -eq 'Cancel this request'
+})[0]
 
-$answerRow = @($decisionRows | Where-Object { $_.card.entities[0].name -eq 'Answer' })[0]
-$cancelRow = @($decisionRows | Where-Object { $_.card.entities[0].name -eq 'Cancel this request' })[0]
-Test-That 'one is Answer and the other is Cancel this request' {
-    $null -ne $answerRow -and $null -ne $cancelRow
+Test-That 'the answer dropdown is still there for a single-field question' {
+    $null -ne $answerRow -and $answerRow.card.entities[0].name -eq 'Answer'
+}
+Test-That 'cancelling is a button, not another dropdown to fill in' {
+    $null -ne $cancelRow
+}
+Test-That 'and it actually cancels when tapped' {
+    "$($cancelRow.card.tap_action.perform_action)" -eq 'select.select_option' -and
+    "$($cancelRow.card.tap_action.data.option)" -eq 'Cancel request'
 }
 Test-That 'Answer shows only when no field dropdown is in play' {
     @($answerRow.conditions | Where-Object {
@@ -157,11 +171,18 @@ Test-That 'Cancel shows only when a field dropdown is in play' {
     }).Count -eq 1
 }
 Test-That 'so the two can never appear together' {
-    # Both variants key off the same signal, one on it and one against it, which is
-    # what makes them mutually exclusive.
     $a = @($answerRow.conditions | Where-Object { "$($_.entity)" -match '_f1$' })[0]
     $c = @($cancelRow.conditions | Where-Object { "$($_.entity)" -match '_f1$' })[0]
     "$($a.entity)" -eq "$($c.entity)" -and "$($a.state)" -eq 'Idle' -and "$($c.state_not)" -eq 'Idle'
+}
+Test-That 'cancel sits with End session, not among the questions' {
+    $idx = 0; $cancelIdx = -1; $replyIdx = -1
+    foreach ($c in $sessionCard.cards) {
+        if ($c.type -eq 'custom:layout-card') { $replyIdx = $idx }
+        if ($c.type -eq 'conditional' -and $c.card.type -eq 'custom:button-card') { $cancelIdx = $idx }
+        $idx++
+    }
+    $cancelIdx -gt $replyIdx -and $replyIdx -ge 0
 }
 
 Write-Host '--- End session is a footer, well away from Send ---'
