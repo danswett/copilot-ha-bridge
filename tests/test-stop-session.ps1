@@ -208,6 +208,65 @@ Remove-CopilotMqttSession -SessionId 'aaaaaaaa-1111-2222-3333-444444444444' -Hea
 $cleared = ($script:MqttMsgs | Where-Object { $_.Topic -match "/button/$node/stop/config$" } | Select-Object -First 1)
 Test-That 'retiring a session clears the stop button too' { $null -ne $cleared -and $cleared.Payload -eq '' }
 
+Write-Host ''
+Write-Host '--- Send always says something ---'
+# A press that produces no visible change reads as a dead button, which is why it
+# was getting pressed twice. Every press now ends in a visible outcome.
+$script:Activity = @()
+$script:Replies = @()
+$script:HaStates = @{}
+
+function Get-HomeAssistantState {
+    param([string]$EntityId, [hashtable]$Headers)
+    if (-not $script:HaStates.ContainsKey($EntityId)) { throw "no such entity $EntityId" }
+    [pscustomobject]@{ state = $script:HaStates[$EntityId]; attributes = [pscustomobject]@{ question = '' } }
+}
+function Set-CopilotMqttActivity {
+    param([string]$SessionId, [string]$Summary, $Detail, [hashtable]$Headers)
+    $script:Activity += $Summary
+}
+function Invoke-DaemonReply {
+    param([string]$SessionId, [string]$Text, [hashtable]$Headers)
+    $script:Replies += $Text
+}
+function Get-CopilotDecisionMarker { param([string]$SessionId) $null }
+
+$replyNode = Get-CopilotMqttNodeId -SessionId 'bbbbbbbb-1111-2222-3333-444444444444'
+function Reset-SendTest {
+    param([string]$Press, [string]$Reply)
+    $script:Activity = @()
+    $script:Replies = @()
+    $script:HaStates = @{
+        "button.${replyNode}_submit"   = $Press
+        "text.${replyNode}_reply"      = $Reply
+        "select.${replyNode}_decision" = 'Idle'
+    }
+    $state = @{ 'bbbbbbbb-1111-2222-3333-444444444444' = [pscustomobject]@{ Name = 'S'; Offset = 0 } }
+    $live = @{ 'bbbbbbbb-1111-2222-3333-444444444444' = [pscustomobject]@{ SessionId = 'bbbbbbbb-1111-2222-3333-444444444444'; ProcessId = 5 } }
+    @{ State = $state; Live = $live }
+}
+
+$ctx = Reset-SendTest -Press '2026-06-01T12:00:00+00:00' -Reply 'hello there'
+Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
+Test-That 'a press with text sends it' { $script:Replies -contains 'hello there' }
+Test-That 'and acknowledges the press immediately' { $script:Activity -contains 'Sending...' }
+
+Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
+Test-That 'the same press does not send twice' { $script:Replies.Count -eq 1 }
+
+$ctx = Reset-SendTest -Press '2026-06-01T12:05:00+00:00' -Reply ' '
+Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
+Test-That 'a press with an empty box sends nothing' { $script:Replies.Count -eq 0 }
+Test-That 'but still reports why, rather than looking dead' {
+    $script:Activity -contains 'Nothing to send'
+}
+
+$ctx = Reset-SendTest -Press 'unknown' -Reply 'text'
+Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
+Test-That 'an unpressed button sends nothing and says nothing' {
+    $script:Replies.Count -eq 0 -and $script:Activity.Count -eq 0
+}
+
 Remove-Item -LiteralPath $testLogFile -Force -ErrorAction SilentlyContinue
 
 Write-Host ''

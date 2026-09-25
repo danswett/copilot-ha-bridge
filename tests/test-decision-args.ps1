@@ -141,8 +141,8 @@ Assert-Case -Name 'two-option-field form no longer flattens (per-field dropdowns
 }
 '@
 
-Assert-Case -Name 'multi-field outline uses titles and marks defaults' `
-    -ExpectedQuestion "Pick`n`nAnswer these in one message:`n1. Scope`n   - Both`n   - Patch only (default)`n2. Notes (free text)" `
+Assert-Case -Name 'a mixed choice + free-text form is answerable, not flattened to an outline' `
+    -ExpectedQuestion 'Pick' `
     -ExpectedChoices @() -Json @'
 {
   "message": "Pick",
@@ -207,6 +207,66 @@ if (@($oneParsed.Choices).Count -eq 2 -and @($oneParsed.Fields).Count -eq 1) {
 else {
     $script:Failures++
     Write-Host "  FAIL  single-field form still yields a plain choice list (choices=$(@($oneParsed.Choices).Count) fields=$(@($oneParsed.Fields).Count))" -ForegroundColor Red
+}
+
+Write-Host "`n--- mixed forms, and the prompts the dashboard must refuse ---"
+# The bug this covers: one free-text field among dropdowns used to discard the whole
+# field set, leaving a card with no options while the terminal showed an arrow-key
+# form. Typed answers were then injected into that prompt and silently discarded.
+$mixed = @'
+{
+  "message": "Pick",
+  "requestedSchema": {
+    "properties": {
+      "look":   { "type":"string","title":"Look","enum":["Good","Bad","Ugly","Fine"] },
+      "button": { "type":"string","title":"Button","enum":["Yes","No","Maybe"] },
+      "detail": { "type":"string","title":"Detail" }
+    }
+  }
+}
+'@ | ConvertFrom-Json
+$mixedParsed = Repair-DecisionToolArguments -ToolArgs $mixed
+$mixedFields = @($mixedParsed.Fields)
+
+function Test-Case {
+    param([string]$Name, [scriptblock]$Condition)
+    $ok = $false
+    try { $ok = [bool](& $Condition) } catch { }
+    if ($ok) { Write-Host "  PASS  $Name" -ForegroundColor Green }
+    else { $script:Failures++; Write-Host "  FAIL  $Name" -ForegroundColor Red }
+}
+
+Test-Case 'every field survives, including the free-text one' { $mixedFields.Count -eq 3 }
+Test-Case 'the dropdown fields keep their options' {
+    ($mixedFields[0].Options -join ',') -eq 'Good,Bad,Ugly,Fine' -and
+    ($mixedFields[1].Options -join ',') -eq 'Yes,No,Maybe'
+}
+Test-Case 'the free-text field is flagged rather than dropped' {
+    (Test-DecisionFieldIsText -Field $mixedFields[2]) -and
+    -not (Test-DecisionFieldIsText -Field $mixedFields[0])
+}
+Test-Case 'a mixed form is answerable from the dashboard' {
+    Test-DecisionFieldsAnswerable -Fields $mixedFields
+}
+Test-Case 'it is not marked terminal-only' { -not $mixedParsed.TerminalOnly }
+
+# Two free-text fields cannot map: there is only one Reply box.
+$twoText = '{"message":"Q","requestedSchema":{"properties":{"a":{"type":"string","title":"A"},"b":{"type":"string","title":"B"}}}}' | ConvertFrom-Json
+$twoTextParsed = Repair-DecisionToolArguments -ToolArgs $twoText
+Test-Case 'two free-text fields are refused, not silently accepted' {
+    -not (Test-DecisionFieldsAnswerable -Fields @($twoTextParsed.Fields)) -and $twoTextParsed.TerminalOnly
+}
+
+# More fields than the card publishes dropdowns for.
+$fiveField = '{"message":"Q","requestedSchema":{"properties":{"a":{"type":"string","enum":["1","2"]},"b":{"type":"string","enum":["1","2"]},"c":{"type":"string","enum":["1","2"]},"d":{"type":"string","enum":["1","2"]},"e":{"type":"string","enum":["1","2"]}}}}' | ConvertFrom-Json
+$fiveParsed = Repair-DecisionToolArguments -ToolArgs $fiveField
+Test-Case 'a five-field form is refused rather than half-answered' { $fiveParsed.TerminalOnly }
+Test-Case 'and it still spells the fields out in the question' { $fiveParsed.Question -match 'Answer these' }
+
+Test-Case 'a single free-text field stays plain freeform' {
+    $one = '{"message":"Q","requestedSchema":{"properties":{"a":{"type":"string","title":"A"}}}}' | ConvertFrom-Json
+    $p = Repair-DecisionToolArguments -ToolArgs $one
+    -not $p.TerminalOnly -and @($p.Choices).Count -eq 0
 }
 
 Write-Host "`n--- legacy shape must still work ---"

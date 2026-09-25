@@ -74,14 +74,21 @@ namespace CopilotCli {
         private const ushort VK_UP = 0x26;
         private const ushort VK_TAB = 0x09;
 
-        public static string SendForm(uint processId, int[] downCounts, int stepDelayMs) {
-            // Answers the native ask_user choice prompt, which renders as an arrow-key
-            // option list per field, shown as tabbed sections for a multi-field form.
+        public static string SendForm(uint processId, int[] downCounts, string[] texts, int stepDelayMs) {
+            // Answers the native ask_user prompt, which renders as an arrow-key option
+            // list per field, shown as tabbed sections for a multi-field form.
             //
-            // Each field is answered by pressing Down to the chosen option's index and
-            // then Enter. Enter is the commit - the prompt's own footer reads
-            // "enter accept" - and on a non-final field it advances to the next one,
-            // while on the last field it submits the whole form.
+            // A field is answered one of two ways. A choice field is answered by
+            // pressing Down to the chosen option's index; a free-text field is
+            // answered by typing its value. Either way Enter commits - the prompt's
+            // own footer reads "enter accept" - and on a non-final field it advances
+            // to the next one, while on the last field it submits the whole form.
+            //
+            // Supporting typed fields is what makes a mixed form answerable at all.
+            // Before this, a form with even one free-text field could not be driven by
+            // arrow keys, so the bridge fell back to a plain text box - and typing
+            // into a live arrow-key prompt silently discards every character, which
+            // lost the answer and left the prompt waiting.
             //
             // Tab is deliberately NOT used to move between fields. It moves focus
             // without committing the highlighted option, so a form driven with
@@ -101,22 +108,48 @@ namespace CopilotCli {
                     return "conin-failed:" + Marshal.GetLastWin32Error();
                 }
 
+                int typed = 0;
                 for (int f = 0; f < downCounts.Length; f++) {
-                    for (int i = 0; i < downCounts[f]; i++) {
-                        if (!WriteVirtualKey(handle, VK_DOWN)) {
-                            return "down-failed:" + Marshal.GetLastWin32Error();
+                    string text = (texts != null && f < texts.Length) ? texts[f] : null;
+
+                    if (text != null) {
+                        // A typed field. The characters go in as one burst, which the
+                        // CLI treats as a paste, so the committing Enter has to be a
+                        // separate keypress after a pause - exactly as in Send().
+                        List<INPUT_RECORD> textRecords = new List<INPUT_RECORD>();
+                        foreach (char c in text) {
+                            AddChar(textRecords, c);
                         }
-                        Thread.Sleep(stepDelayMs);
+                        if (textRecords.Count > 0) {
+                            INPUT_RECORD[] textBuffer = textRecords.ToArray();
+                            uint textWritten;
+                            if (!WriteConsoleInputW(handle, textBuffer, (uint)textBuffer.Length, out textWritten)) {
+                                return "write-failed:" + Marshal.GetLastWin32Error();
+                            }
+                            if (textWritten != textBuffer.Length) {
+                                return "partial:" + textWritten + "/" + textBuffer.Length;
+                            }
+                            typed++;
+                        }
                     }
+                    else {
+                        for (int i = 0; i < downCounts[f]; i++) {
+                            if (!WriteVirtualKey(handle, VK_DOWN)) {
+                                return "down-failed:" + Marshal.GetLastWin32Error();
+                            }
+                            Thread.Sleep(stepDelayMs);
+                        }
+                    }
+
                     // Commit this field. The final one submits the form.
-                    Thread.Sleep(stepDelayMs);
+                    Thread.Sleep(stepDelayMs * 2);
                     if (!WriteVirtualKey(handle, VK_RETURN)) {
                         return "commit-failed:" + Marshal.GetLastWin32Error();
                     }
                     Thread.Sleep(stepDelayMs * 2);
                 }
 
-                return "ok:form";
+                return "ok:form:" + downCounts.Length + ":typed" + typed;
             }
             finally {
                 if (handle != IntPtr.Zero && handle != new IntPtr(-1)) {
@@ -415,28 +448,35 @@ function Send-CopilotSessionPrompt {
 
 function Send-CopilotSessionForm {
     <#
-        Answers the native ask_user choice prompt by selecting an option in each field.
+        Answers the native ask_user prompt field by field.
 
         The prompt renders one arrow-key option list per field, tabbed when there is
         more than one ("up/down select - enter accept - tab next"). Given the field
-        definitions captured when the decision was armed, plus the option chosen for
-        each field, this presses Down to each option's index, Tab between fields, and
-        Enter once to accept.
+        definitions captured when the decision was armed, plus the value chosen or
+        typed for each field, this drives each field in turn and commits with Enter.
 
-        Selecting by index is preferred over typing into the per-field "Other (type
-        your answer)" entry because it returns the schema's real value for the field
-        rather than free text, which is what the model expects back.
+        A field marked IsText is typed rather than selected. That is what makes a form
+        mixing dropdowns with a free-text box answerable: previously one free-text
+        field made the whole form unanswerable by arrow keys, the bridge fell back to
+        a plain text box, and the typed answer was silently discarded by the live
+        arrow-key prompt.
+
+        Selecting by index is preferred over typing into a choice field's "Other (type
+        your answer)" entry because it returns the schema's real value rather than
+        free text, which is what the model expects back.
     #>
     param(
         [Parameter(Mandatory)]
         [string]$SessionId,
 
-        # Ordered field definitions: each needs .Options (the visible option list).
+        # Ordered field definitions: each needs .Options, and optionally .IsText.
         [Parameter(Mandatory)]
         [object[]]$Fields,
 
-        # Ordered chosen option label per field, matching $Fields.
+        # Ordered value per field, matching $Fields: a chosen option label for a
+        # choice field, or the literal text for a text field.
         [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string[]]$Selections,
 
         [int]$StepDelayMs = 120
@@ -450,7 +490,16 @@ function Send-CopilotSessionForm {
     }
 
     $downs = New-Object System.Collections.Generic.List[int]
+    $texts = New-Object System.Collections.Generic.List[string]
     for ($i = 0; $i -lt $Fields.Count; $i++) {
+        if (Test-DecisionFieldIsText -Field $Fields[$i]) {
+            $downs.Add(0)
+            # Normalised the same way a reply is: a newline mid-form would commit the
+            # field early and leave the rest of the prompt unanswered.
+            $texts.Add((Get-CopilotInjectableText -Text ([string]$Selections[$i])))
+            continue
+        }
+
         $options = @($Fields[$i].Options | ForEach-Object { [string]$_ })
         $idx = [Array]::IndexOf($options, [string]$Selections[$i])
         if ($idx -lt 0) {
@@ -458,13 +507,19 @@ function Send-CopilotSessionForm {
             return $result
         }
         $downs.Add($idx)
+        $texts.Add($null)
     }
 
-    # Record exactly what is about to be typed into the prompt. When a field comes
+    # Record exactly what is about to be delivered to the prompt. When a field comes
     # back wrong, this is the difference between knowing the index was miscomputed and
     # knowing the keystrokes were mis-delivered.
     $trace = for ($i = 0; $i -lt $Fields.Count; $i++) {
-        "$($Fields[$i].Label)='$($Selections[$i])' idx=$($downs[$i]) of [$(@($Fields[$i].Options) -join ',')]"
+        if (Test-DecisionFieldIsText -Field $Fields[$i]) {
+            "$($Fields[$i].Label)=<typed $(([string]$Selections[$i]).Length) chars>"
+        }
+        else {
+            "$($Fields[$i].Label)='$($Selections[$i])' idx=$($downs[$i]) of [$(@($Fields[$i].Options) -join ',')]"
+        }
     }
     $result.Detail = ($trace -join ' ; ')
 
@@ -478,7 +533,7 @@ function Send-CopilotSessionForm {
     try {
         Initialize-CopilotConsoleInjector
         $outcome = [CopilotCli.ConsoleInjector]::SendForm(
-            [uint32]$processId, $downs.ToArray(), $StepDelayMs
+            [uint32]$processId, $downs.ToArray(), $texts.ToArray(), $StepDelayMs
         )
         $result.Detail = "$outcome | " + $result.Detail
         $result.Delivered = $outcome.StartsWith('ok:')

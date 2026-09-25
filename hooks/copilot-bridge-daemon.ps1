@@ -116,6 +116,16 @@ $script:DaemonNewSessionLastPress = ''
 $script:DaemonResumeCache = @()
 $script:DaemonResumeCacheAt = [DateTimeOffset]::MinValue
 
+# Decisions already reported as terminal-only, so the daemon says it once per
+# question instead of on every reconcile. Initialised for StrictMode.
+$script:DaemonTerminalOnlyWarned = @{}
+
+# Launcher process per session the bridge started itself, so End can close the
+# console it opened. A window the user opened is deliberately never touched - that
+# terminal is theirs. Not persisted: after a daemon restart the association is gone
+# and the window is simply left alone, which is the safe direction to fail.
+$script:DaemonLaunchedPids = @{}
+
 # Anything the dashboard reports as happening before this is a leftover from a
 # previous run rather than something the user just did.
 $script:DaemonStartedAt = [DateTimeOffset]::Now
@@ -738,26 +748,14 @@ function Invoke-PendingReplies {
             # Unreadable decision state: treat the reply as a continuation, the common case.
         }
 
-        try {
-            $replyState = Get-HomeAssistantState -EntityId $replyEntity -Headers $Headers
-        }
-        catch {
-            continue
-        }
-
-        $value = [string]$replyState.state
-        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('unknown', 'unavailable')) {
-            continue
-        }
-
         $entry = $State[$sessionId]
 
-        # A reply is only sent when Send is pressed. Home Assistant commits a text
-        # entity as soon as the field loses focus, so acting on the value alone fired
-        # the moment you clicked away - easy to trigger by accident and impossible to
-        # correct. The button's state is the timestamp of its last press; a press only
-        # counts once, tracked per session, so the same press cannot also fire a
-        # later reply.
+        # Read the press first. The old order read the reply box first and bailed on a
+        # blank one, which lost the race Home Assistant creates: a text entity commits
+        # when it loses focus, and on a phone the tap that commits it *is* the tap on
+        # Send. The first read could therefore still see the old, blank value, nothing
+        # was sent, and nothing said so - which is why a reply sometimes needed Send
+        # pressed twice.
         $press = ''
         try {
             $btn = Get-HomeAssistantState -EntityId "button.${node}_submit" -Headers $Headers
@@ -771,11 +769,47 @@ function Invoke-PendingReplies {
         $lastSubmit = if ($entry.PSObject.Properties['LastSubmitAt']) { [string]$entry.LastSubmitAt } else { '' }
         if ($press -eq $lastSubmit) { continue }
 
+        try {
+            $replyState = Get-HomeAssistantState -EntityId $replyEntity -Headers $Headers
+        }
+        catch {
+            continue
+        }
+        $value = [string]$replyState.state
+
+        # Give the commit a moment to land before concluding there is nothing to send.
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('unknown', 'unavailable')) {
+            Start-Sleep -Milliseconds 700
+            try {
+                $replyState = Get-HomeAssistantState -EntityId $replyEntity -Headers $Headers
+                $value = [string]$replyState.state
+            }
+            catch { }
+        }
+
+        # Acknowledge the press immediately. A press that produces no visible change
+        # for even a second reads as a dead button, which is the other half of why it
+        # got pressed twice.
+        try {
+            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Sending...' `
+                -Detail @{ session = [string]$entry.Name } -Headers $Headers
+        }
+        catch { }
+
         if ($entry.PSObject.Properties['LastSubmitAt']) { $entry.LastSubmitAt = $press }
         else { $entry | Add-Member -NotePropertyName LastSubmitAt -NotePropertyValue $press -Force }
 
-        $lastReply = if ($entry.PSObject.Properties['LastReply']) { [string]$entry.LastReply } else { '' }
-        if ($value -eq $lastReply) { continue }
+        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('unknown', 'unavailable')) {
+            # Say so rather than doing nothing. Silence here is indistinguishable from
+            # a broken button.
+            try {
+                Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Nothing to send' `
+                    -Detail @{ session = [string]$entry.Name; hint = 'Type a reply first, then press Send.' } -Headers $Headers
+            }
+            catch { }
+            Write-DaemonLog -Message "send pressed for $($sessionId.Substring(0,8)) with an empty reply box"
+            continue
+        }
 
         if ($entry.PSObject.Properties['LastReply']) {
             $entry.LastReply = $value
@@ -923,14 +957,21 @@ function Invoke-PendingDecisions {
         $isChoice = ([string]$marker.mode -eq 'multiple_choice')
         $markerFields = @($marker.fields)
         $isMultiField = $markerFields.Count -gt 1
+        $terminalOnly = $false
+        if ($marker.PSObject.Properties['terminalOnly']) { $terminalOnly = [bool]$marker.terminalOnly }
 
         # A hook whose Home Assistant work was cut short by its deadline leaves a
         # marker with no card behind it. Arm it here so an outage during the hook does
         # not silently cost the question its dashboard card.
+        #
+        # Armed-ness is read from the question attribute, not the option count. A
+        # freeform question legitimately publishes a single-option selector, so
+        # counting options treated every freeform card as unarmed and re-published it
+        # on every reconcile - observed as the same line repeating every 18 seconds for
+        # minutes on end, each one resetting the card the user was looking at.
         try {
             $armed = Get-HomeAssistantState -EntityId "select.${node}_decision" -Headers $Headers
-            $armedOptions = @($armed.attributes.options)
-            if ($armedOptions.Count -le 1) {
+            if ([string]::IsNullOrWhiteSpace([string]$armed.attributes.question)) {
                 Set-CopilotMqttDecision -SessionId $sessionId `
                     -SessionName ([string]$State[$sessionId].Name) `
                     -Machine ([string]$State[$sessionId].Machine) `
@@ -942,6 +983,20 @@ function Invoke-PendingDecisions {
         }
         catch {
             Write-DaemonLog -Message "marker re-arm check failed for $sessionId : $($_.Exception.Message)"
+        }
+
+        # Some prompts cannot be driven from the dashboard at all - more fields than
+        # it publishes dropdowns for, or more than one free-text field. The native
+        # prompt is an arrow-key form, and characters typed at it are discarded, so
+        # injecting anything here would lose the answer and leave the prompt waiting.
+        # The card says to answer in the terminal; this makes sure nothing is sent.
+        if ($terminalOnly) {
+            $decisionKey = [string]$marker.decisionId
+            if (-not $script:DaemonTerminalOnlyWarned.ContainsKey($decisionKey)) {
+                $script:DaemonTerminalOnlyWarned[$decisionKey] = $true
+                Write-DaemonLog -Message "decision for $($sessionId.Substring(0,8)) must be answered in the terminal; not injecting"
+            }
+            continue
         }
 
         try {
@@ -956,6 +1011,19 @@ function Invoke-PendingDecisions {
                 else {
                     $picked = @()
                     for ($fi = 1; $fi -le $markerFields.Count; $fi++) {
+                        $markerField = $markerFields[$fi - 1]
+
+                        # A free-text field has no dropdown - it is answered in the
+                        # Reply box, which is what makes a mixed form answerable at
+                        # all. Its slot is collapsed, so read the box instead.
+                        if (Test-DecisionFieldIsText -Field $markerField) {
+                            $rep = Get-HomeAssistantState -EntityId "text.${node}_reply" -Headers $Headers
+                            $v = [string]$rep.state
+                            if ([string]::IsNullOrWhiteSpace($v) -or $v -in @('unknown', 'unavailable')) { $picked = @(); break }
+                            $picked += $v
+                            continue
+                        }
+
                         $fs = Get-HomeAssistantState `
                             -EntityId (Get-CopilotMqttFieldEntityId -Node $node -Index $fi) -Headers $Headers
                         $v = [string]$fs.state
@@ -969,32 +1037,61 @@ function Invoke-PendingDecisions {
                     # last press, so a press counts only if it is newer than the moment
                     # this question was armed - otherwise a press left over from a
                     # previous question would fire this one instantly.
-                    if ($picked.Count -eq $markerFields.Count) {
-                        $submitted = $false
+                    $submitted = $false
+                    $pressIsNew = $false
+                    $pressedAt = ''
+                    try {
+                        $btn = Get-HomeAssistantState -EntityId "button.${node}_submit" -Headers $Headers
+                        $pressedAt = [string]$btn.state
+                        if ($pressedAt -notin @('unknown', 'unavailable', '')) {
+                            $armedAt = [datetimeoffset][string]$marker.armedAt
+                            $pressIsNew = ([datetimeoffset]$pressedAt) -gt $armedAt
+                        }
+                    }
+                    catch {
+                        # No button (older session): fall back to submitting as soon as
+                        # every field is chosen rather than hanging.
+                        $pressIsNew = ($picked.Count -eq $markerFields.Count)
+                    }
+
+                    if ($pressIsNew -and $picked.Count -ne $markerFields.Count) {
+                        # Pressed with something still unanswered. Saying which is
+                        # missing is the difference between a button that looks broken
+                        # and one that is waiting on you.
+                        $missing = @()
+                        for ($fi = 0; $fi -lt $markerFields.Count; $fi++) {
+                            if ($fi -lt $picked.Count) { continue }
+                            $missing += [string]$markerFields[$fi].Label
+                        }
                         try {
-                            $btn = Get-HomeAssistantState -EntityId "button.${node}_submit" -Headers $Headers
-                            $pressedAt = [string]$btn.state
-                            if ($pressedAt -notin @('unknown', 'unavailable', '')) {
-                                $armedAt = [datetimeoffset][string]$marker.armedAt
-                                $submitted = ([datetimeoffset]$pressedAt) -gt $armedAt
-                                if ($submitted) {
-                                    # Consume the press so the same one cannot also be
-                                    # read as a Send for the reply box afterwards.
-                                    $entry = $State[$sessionId]
-                                    if ($entry.PSObject.Properties['LastSubmitAt']) { $entry.LastSubmitAt = $pressedAt }
-                                    else { $entry | Add-Member -NotePropertyName LastSubmitAt -NotePropertyValue $pressedAt -Force }
-                                }
-                            }
+                            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Not sent - answer every field' `
+                                -Detail @{ waiting_on = ($missing -join ', ') } -Headers $Headers
                         }
-                        catch {
-                            # No button (older session): fall back to submitting as
-                            # soon as every field is chosen rather than hanging.
-                            $submitted = $true
+                        catch { }
+                        Write-DaemonLog -Message "submit pressed for $($sessionId.Substring(0,8)) with fields still unanswered"
+                    }
+
+                    if ($pressIsNew -and $picked.Count -eq $markerFields.Count) {
+                        $submitted = $true
+                        if (-not [string]::IsNullOrWhiteSpace($pressedAt)) {
+                            # Consume the press so the same one cannot also be read as
+                            # a Send for the reply box afterwards.
+                            $entry = $State[$sessionId]
+                            if ($entry.PSObject.Properties['LastSubmitAt']) { $entry.LastSubmitAt = $pressedAt }
+                            else { $entry | Add-Member -NotePropertyName LastSubmitAt -NotePropertyValue $pressedAt -Force }
                         }
-                        if ($submitted) {
-                            $selections = @($picked)
-                            $answer = ($picked -join ' + ')
+                        # Acknowledge the press before the injection, which takes a
+                        # noticeable moment for a multi-field form.
+                        try {
+                            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Sending answer...' `
+                                -Detail @{ answer = ($picked -join ' + ') } -Headers $Headers
                         }
+                        catch { }
+                    }
+
+                    if ($submitted) {
+                        $selections = @($picked)
+                        $answer = ($picked -join ' + ')
                     }
                 }
             }
@@ -1083,9 +1180,21 @@ function Invoke-DaemonDecisionAnswer {
                 -Data @{ entity_id = "text.${node}_reply"; value = $script:DaemonConfig.ReplyBlankValue }
         }
         catch { }
+        try {
+            $shown = ($Answer -replace '\s+', ' ').Trim()
+            if ($shown.Length -gt 60) { $shown = $shown.Substring(0, 57) + '...' }
+            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Answer sent' `
+                -Detail @{ answer = $shown; at = [DateTimeOffset]::Now.ToString('HH:mm:ss') } -Headers $Headers
+        }
+        catch { }
         Write-DaemonLog -Message "decision answer injected to $short (pid $($delivery.ProcessId)): $($delivery.Detail)"
     }
     else {
+        try {
+            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Answer NOT sent' `
+                -Detail @{ error = [string]$delivery.Detail } -Headers $Headers
+        }
+        catch { }
         Write-DaemonLog -Message "decision answer injection FAILED for $short : $($delivery.Detail)"
     }
     $delivery.Delivered
@@ -1293,6 +1402,33 @@ function Invoke-PendingStops {
         $stop = Stop-BridgeCopilotSession -SessionId $sessionId -ProcessId $processId
         if ($stop.Stopped) {
             Write-DaemonLog -Message "ended $short : $($stop.Detail)"
+
+            # Close the console the bridge opened for this session. The CLI exiting
+            # does not always take its launcher with it - Agency wraps the CLI, so the
+            # wrapper can outlive it and leave an empty window sitting there needing a
+            # second exit typed into it.
+            #
+            # Only ever applied to a process the bridge started itself. A terminal the
+            # user opened is theirs, and closing it would throw away whatever else is
+            # in that window.
+            $launcherPid = 0
+            if ($script:DaemonLaunchedPids.ContainsKey($sessionId)) {
+                $launcherPid = [int]$script:DaemonLaunchedPids[$sessionId]
+            }
+            if ($launcherPid -gt 0 -and $launcherPid -ne $processId) {
+                Start-Sleep -Milliseconds 1200
+                $launcher = Get-Process -Id $launcherPid -ErrorAction SilentlyContinue
+                if ($null -ne $launcher) {
+                    try {
+                        Stop-Process -Id $launcherPid -Force -ErrorAction Stop
+                        Write-DaemonLog -Message "closed the window the bridge opened for $short (pid $launcherPid)"
+                    }
+                    catch {
+                        Write-DaemonLog -Message "could not close the window for $short : $($_.Exception.Message)"
+                    }
+                }
+            }
+            [void]$script:DaemonLaunchedPids.Remove($sessionId)
         }
         else {
             Write-DaemonLog -Message "could not end $short : $($stop.Detail)"
@@ -1677,6 +1813,12 @@ function Sync-DaemonNewSession {
     }
 
     Write-DaemonLog -Message "new session launched: $($launch.Detail) (session $($launch.SessionId))"
+
+    # Remember the process the bridge started, so End session can close the console
+    # window it opened rather than leaving an empty terminal behind.
+    if ($launch.ProcessId -gt 0) {
+        $script:DaemonLaunchedPids[[string]$launch.SessionId] = [int]$launch.ProcessId
+    }
 
     $verb = if ($null -ne $resumeSession) { 'Resumed' } else { 'Started' }
     $where = if ($null -ne $resumeSession) {
@@ -2308,6 +2450,24 @@ function Invoke-DaemonReply {
     else {
         Write-DaemonLog -Message "reply delivery FAILED for $short : $($delivery.Detail)"
     }
+
+    # Confirm on the card. The box clearing is the only other signal, and on its own
+    # it is ambiguous - a cleared box looks the same whether the reply reached the
+    # session or vanished. A failure especially must be visible: the whole point of
+    # the reply box is that nobody is watching the terminal.
+    try {
+        $preview = ($Text -replace '\s+', ' ').Trim()
+        if ($preview.Length -gt 60) { $preview = $preview.Substring(0, 57) + '...' }
+        if ($delivery.Delivered) {
+            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Reply sent' `
+                -Detail @{ sent = $preview; at = [DateTimeOffset]::Now.ToString('HH:mm:ss') } -Headers $Headers
+        }
+        else {
+            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Reply NOT sent' `
+                -Detail @{ error = [string]$delivery.Detail; unsent = $preview } -Headers $Headers
+        }
+    }
+    catch { }
 
     # Clear the box either way, so a failed delivery is not silently resent. The
     # reply box is an optimistic MQTT text entity with no state topic, so its value

@@ -720,14 +720,25 @@ function Save-CopilotSessionDashboard {
         $decisionEntity = "select.${node}_decision"
         $replyEntity = "text.${node}_reply"
 
-        # Three visual states, driven by card-mod:
-        #   waiting for an answer -> amber, pulsing (a question is armed)
-        #   working               -> blue, pulsing
-        #   idle / turn finished  -> no glow at all
-        # "Waiting" is checked first because an armed ask_user happens mid-turn, so the
-        # session is still 'working' underneath and would otherwise show blue.
-        $headerStyle = @"
-ha-card {
+        # The whole session is one card, not five stacked ones.
+        #
+        # Previously the chrome was inconsistent: the header carried the border and
+        # glow, the answer and end rows drew their own default card backgrounds, and
+        # the reply row was bare. Four different treatments in a column read as four
+        # loose cards rather than one session.
+        #
+        # So the border, background and state glow move to the stack itself, every
+        # child is stripped bare, and the stack's inter-card margins are collapsed.
+        # `overflow: hidden` keeps the children's square corners inside the rounded
+        # outer edge.
+        $sessionCardStyle = @"
+:host {
+  display: block;
+  border-radius: var(--ha-card-border-radius, 12px);
+  background: var(--ha-card-background, var(--card-background-color, #fff));
+  overflow: hidden;
+  padding: 4px 12px 10px 12px;
+  box-sizing: border-box;
   {% if state_attr('$decisionEntity','question') %}
   border: 1px solid var(--warning-color);
   animation: cpwait 1.6s ease-in-out infinite;
@@ -741,6 +752,12 @@ ha-card {
   {% endif %}
   transition: border 0.4s ease;
 }
+/* Collapse the 8px the stack puts between children, so the sections butt together
+   as one surface instead of floating apart. */
+#root > * {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
 @keyframes cpwork {
   0%   { box-shadow: 0 0 6px 0px var(--primary-color); }
   50%  { box-shadow: 0 0 16px 2px var(--primary-color); }
@@ -753,6 +770,42 @@ ha-card {
 }
 "@
 
+        # Every child is transparent now - the stack above provides the one surface
+        # they all sit on. Without this each card draws its own background and the
+        # column goes back to looking like separate cards.
+        $bareChild = @"
+ha-card {
+  border: none !important;
+  box-shadow: none !important;
+  background: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  width: 100%;
+}
+.card-content { padding: 0 !important; }
+"@
+
+        # The Answer and per-field dropdowns are styled to line up with the reply box
+        # below them. They carried a leading icon, which indented the row, and let the
+        # control hug the right edge - the exact opposite of the reply box, which
+        # starts hard against the card's left edge and fills the width. Dropping the
+        # icon aligns the left edges; stretching the select makes both controls span
+        # the same area.
+        #
+        # The label is kept, unlike the reply box's: with several dropdowns stacked,
+        # the field name is the only thing telling them apart.
+        $selectRow = @{
+            '.' = ':host { --mdc-icon-size: 0px; }'
+            'hui-generic-entity-row$' = @'
+state-badge { display: none !important; }
+.info { flex: 0 1 auto; margin-right: 12px; }
+'@
+        }
+        $selectRowCard = @"
+$bareChild
+ha-select, mwc-select { width: 100%; }
+"@
+
         # The collapsed card always carries the whole thing: the full question when one
         # is waiting, otherwise the full text of the last response. The expander holds
         # only supporting detail - the model's reasoning when Detailed activity is on, and
@@ -760,7 +813,7 @@ ha-card {
         # what was actually asked or answered.
         $header = @{
             type = 'markdown'
-            card_mod = @{ style = $headerStyle }
+            card_mod = @{ style = $bareChild }
             content = @"
 ### {% if state_attr('$decisionEntity','question') %}🟡{% elif is_state('$statusEntity','working') %}🟢{% else %}⚪{% endif %} $($session.Name)
 *$($session.Machine)* &bull; status: **{% if state_attr('$decisionEntity','question') %}waiting for you{% else %}{{ states('$statusEntity') }}{% endif %}** &bull; {{ states('$activityEntity') }}
@@ -798,7 +851,8 @@ ha-card {
             card = @{
                 type = 'entities'
                 show_header_toggle = $false
-                entities = @(@{ entity = $decisionEntity; name = 'Answer' })
+                card_mod = @{ style = $selectRowCard }
+                entities = @(@{ entity = $decisionEntity; name = 'Answer'; card_mod = @{ style = $selectRow } })
             }
         }
 
@@ -820,7 +874,8 @@ ha-card {
                 card = @{
                     type = 'entities'
                     show_header_toggle = $false
-                    entities = @(@{ entity = $fe })
+                    card_mod = @{ style = $selectRowCard }
+                    entities = @(@{ entity = $fe; card_mod = @{ style = $selectRow } })
                 }
             }
         }
@@ -857,6 +912,7 @@ ha-card {
             '.' = ':host { --mdc-icon-size: 0px; }'
             'hui-generic-entity-row$' = 'state-badge { display: none !important; } .info { display: none !important; }'
         }
+
         $replyCard = @{
             type = 'custom:layout-card'
             layout_type = 'custom:grid-layout'
@@ -868,7 +924,7 @@ ha-card {
                 # the middle of the row instead of filling it.
                 'align-items' = 'center'
                 'justify-items' = 'stretch'
-                margin = '0'
+                margin = '6px 0 0 0'
             }
             cards = @(
                 @{
@@ -920,14 +976,64 @@ ha-card {
             )
         }
 
-        # Ending the session. A plain row rather than a prominent button: it should be
-        # findable without being the easiest thing on the card to hit by accident.
-        # Safe either way - the stop is graceful and the session stays resumable.
+        # Ending the session, as a footer action rather than another control in the
+        # stack of controls.
+        #
+        # It used to be a full-width row directly beneath the reply box, which put it
+        # immediately under Send - the one button you tap most, and the one you least
+        # want to miss. Send sits at the right edge of the row above, so End is pinned
+        # to the left and rendered small and muted: furthest from Send, and clearly
+        # secondary to everything above it.
+        #
+        # The hairline above it does double duty - it separates End from Send, and it
+        # closes the card off as a footer, which is what makes the whole thing read as
+        # one unit rather than a column that simply stops.
         $stopCard = @{
-            type = 'entities'
-            entities = @(
-                @{ entity = "button.${node}_stop"; name = 'End session'; icon = 'mdi:stop-circle-outline' }
-            )
+            type = 'custom:button-card'
+            entity = "button.${node}_stop"
+            name = 'End session'
+            icon = 'mdi:stop-circle-outline'
+            show_state = $false
+            tap_action = @{ action = 'toggle' }
+            styles = @{
+                card = @(
+                    @{ background = 'none' }
+                    @{ border = 'none' }
+                    @{ 'border-top' = '1px solid var(--divider-color)' }
+                    @{ 'border-radius' = '0' }
+                    @{ 'box-shadow' = 'none' }
+                    @{ height = 'auto' }
+                    @{ padding = '8px 0 0 0' }
+                    @{ 'margin-top' = '10px' }
+                )
+                # Icon and label on one left-aligned row. Without collapsing
+                # button-card's default grid the label stacks under the icon and
+                # centres itself, which reads as a primary action rather than a
+                # footer link.
+                grid = @(
+                    @{ 'grid-template-areas' = '"i n"' }
+                    @{ 'grid-template-columns' = 'min-content auto' }
+                    @{ 'grid-template-rows' = 'auto' }
+                    @{ 'justify-items' = 'start' }
+                    @{ 'align-items' = 'center' }
+                    @{ 'grid-gap' = '6px' }
+                )
+                img_cell = @(
+                    @{ 'justify-self' = 'start' }
+                    @{ margin = '0' }
+                    @{ padding = '0' }
+                )
+                icon = @(
+                    @{ color = 'var(--secondary-text-color)' }
+                    @{ width = '17px' }
+                )
+                name = @(
+                    @{ 'font-size' = '12px' }
+                    @{ color = 'var(--secondary-text-color)' }
+                    @{ 'justify-self' = 'start' }
+                    @{ 'text-align' = 'left' }
+                )
+            }
         }
 
         # Each session is a vertical stack of its own cards. In a masonry view these
@@ -936,6 +1042,7 @@ ha-card {
         # card beside it.
         @{
             type = 'vertical-stack'
+            card_mod = @{ style = $sessionCardStyle }
             cards = @($header) + @($fieldCards) + @($answerCard, $replyCard, $stopCard)
         }
     }

@@ -842,7 +842,7 @@ function Publish-CopilotMqttDecisionFields {
         # stable across questions.
         $options = @('Idle')
         $label = "Field $i"
-        if ($null -ne $field) {
+        if ($null -ne $field -and -not (Test-DecisionFieldIsText -Field $field)) {
             $label = [string]$field.Label
             if ([string]::IsNullOrWhiteSpace($label)) { $label = "Field $i" }
             $options = @('Choose...') + @(

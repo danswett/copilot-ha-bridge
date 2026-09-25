@@ -644,18 +644,60 @@ function Format-DecisionSchemaOutline {
     "Answer these in one message:`n" + ($lines -join "`n")
 }
 
+function Test-DecisionFieldIsText {
+    <#
+        True when a captured field is a free-text box rather than an option list.
+
+        A field with no options is one the user types into. Recorded explicitly rather
+        than inferred from an empty Options list everywhere, because that emptiness
+        used to mean "unanswerable" and the distinction now matters.
+    #>
+    param([AllowNull()][object]$Field)
+
+    if ($null -eq $Field) { return $false }
+    if ($Field.PSObject.Properties['IsText']) { return [bool]$Field.IsText }
+    return (@($Field.Options).Count -eq 0)
+}
+
+function Test-DecisionFieldsAnswerable {
+    <#
+        Whether a captured field set can actually be answered from Home Assistant.
+
+        Answerable means every field maps to a control on the card: a dropdown per
+        choice field, and the existing Reply box for a free-text field. That allows at
+        most one text field, and no more fields than the card publishes dropdowns for.
+
+        Anything else has to be answered at the terminal. Saying so is the point - the
+        bridge used to publish a plain text box for these, and typing into the live
+        arrow-key prompt discarded the answer silently.
+    #>
+    param(
+        [AllowNull()][AllowEmptyCollection()][object[]]$Fields,
+        [int]$MaxFields = 4
+    )
+
+    $list = @($Fields)
+    if ($list.Count -eq 0 -or $list.Count -gt $MaxFields) { return $false }
+    $textCount = @($list | Where-Object { Test-DecisionFieldIsText -Field $_ }).Count
+    ($textCount -le 1)
+}
+
 function Get-DecisionSchemaFields {
     <#
-        Returns the per-field option lists of a requestedSchema, in order.
+        Returns the per-field definitions of a requestedSchema, in order.
 
         The native ask_user prompt renders a multi-field form as tabbed sections -
-        "tab next" moves between fields, each with its own arrow-key option list. To
-        answer such a form by injection the bridge needs each field's options in order
-        so it can compute how many Down presses select a given option, so this is
-        captured alongside the combined choice labels shown in Home Assistant.
+        "tab next" moves between fields, each with its own arrow-key option list or
+        text entry. To answer such a form by injection the bridge needs each field in
+        order, so it can compute how many Down presses select a given option, or know
+        to type instead.
 
-        Returns an array of @{ Label; Options }, or an empty array if any field is free
-        text (which cannot be answered by arrow keys alone).
+        Free-text fields are included and flagged, not discarded. Discarding them used
+        to throw away the entire form - a single free-text field among four dropdowns
+        left the card with no options at all, and the resulting free-text answer was
+        swallowed by the live prompt.
+
+        Returns an array of @{ Label; Options; IsText }.
     #>
     param(
         [AllowNull()][psobject]$Schema
@@ -671,8 +713,11 @@ function Get-DecisionSchemaFields {
         $label = [string]$field.title
         if ([string]::IsNullOrWhiteSpace($label)) { $label = $name }
         $options = @(Get-DecisionSchemaFieldOptions -Field $field)
-        if ($options.Count -eq 0) { return @() }
-        $fields += [pscustomobject]@{ Label = $label; Options = @($options) }
+        $fields += [pscustomobject]@{
+            Label   = $label
+            Options = @($options)
+            IsText  = ($options.Count -eq 0)
+        }
     }
     @($fields)
 }
@@ -766,6 +811,7 @@ function Repair-DecisionToolArguments {
     $choices = @()
     $combos = @()
     $fields = @()
+    $terminalOnly = $false
 
     if ($null -ne $ToolArgs) {
         # Current Copilot CLI ask_user passes `message`; older builds passed `question`.
@@ -813,8 +859,7 @@ function Repair-DecisionToolArguments {
                 # remains as the text fallback. Capture the fields; leave $choices
                 # empty so nothing flattens into a single unreadable list.
                 $schemaFields = Get-DecisionSchemaFields -Schema $schema
-                if ($null -ne $schemaFields -and @($schemaFields).Count -gt 1 -and
-                    @($schemaFields).Count -le 4) {
+                if (@($schemaFields).Count -gt 1 -and (Test-DecisionFieldsAnswerable -Fields $schemaFields)) {
                     $fields = @($schemaFields)
                 }
                 else {
@@ -822,6 +867,11 @@ function Repair-DecisionToolArguments {
                     if (-not [string]::IsNullOrWhiteSpace($outline)) {
                         $question = "$question`n`n$outline"
                     }
+                    # A multi-field prompt the card cannot drive must be flagged, not
+                    # quietly turned into a text box. The native prompt is an
+                    # arrow-key form, and typed characters sent to it are discarded -
+                    # the answer disappears and the prompt keeps waiting.
+                    if (@($schemaFields).Count -gt 1) { $terminalOnly = $true }
                 }
             }
         }
@@ -933,6 +983,7 @@ function Repair-DecisionToolArguments {
         Choices = @($choices)
         Combos = @($combos)
         Fields = @($fields)
+        TerminalOnly = $terminalOnly
         Recovered = $recovered
     }
 }
@@ -1147,6 +1198,7 @@ function Write-CopilotDecisionMarker {
         [string[]]$Choices = @(),
         [AllowNull()][object[]]$Combos = @(),
         [AllowNull()][object[]]$Fields = @(),
+        [switch]$TerminalOnly,
         [Parameter(Mandatory)][ValidateSet('freeform', 'multiple_choice')][string]$Mode
     )
 
@@ -1156,6 +1208,9 @@ function Write-CopilotDecisionMarker {
         choices = @($Choices)
         combos = @($Combos)
         fields = @($Fields)
+        # The daemon refuses to inject when this is set: the native prompt is a form
+        # the card cannot drive, and text sent to it would be silently discarded.
+        terminalOnly = [bool]$TerminalOnly
         mode = $Mode
         armedAt = [DateTimeOffset]::Now.ToString('o')
         injectedAnswer = ''

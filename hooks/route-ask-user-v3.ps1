@@ -62,14 +62,31 @@ try {
     $choices = @($parsed.Choices)
     $combos = @($parsed.Combos)
     $fields = @($parsed.Fields)
+    $terminalOnly = [bool]$parsed.TerminalOnly
     $mode = if ($choices.Count -gt 0 -or $fields.Count -gt 0) { 'multiple_choice' } else { 'freeform' }
+
+    # Say so on the card rather than offering a box that cannot work. The native
+    # prompt here is an arrow-key form the dashboard cannot drive, and anything typed
+    # at it is discarded, so the honest thing is to send the user to the terminal.
+    if ($terminalOnly) {
+        $question = "$question`n`n**This one has to be answered in the terminal** - it has more fields than the dashboard can drive, so a reply typed here would not reach the prompt."
+    }
+    else {
+        # A mixed form answers its dropdowns from the field selectors and its one
+        # free-text field from the Reply box, so say which is which - otherwise the
+        # box looks like an unrelated "continue the conversation" field.
+        $textField = @($fields | Where-Object { Test-DecisionFieldIsText -Field $_ }) | Select-Object -First 1
+        if ($null -ne $textField) {
+            $question = "$question`n`n*Type **$($textField.Label)** in the Reply box, choose the rest above, then press Send.*"
+        }
+    }
 
     $argKeys = if ($null -ne $toolArgs) {
         (@($toolArgs.PSObject.Properties.Name) -join ',')
     }
     else { '<none>' }
     Write-DecisionBridgeLog -Message (
-        "ask_user parsed (v3): argKeys=[$argKeys] choices=$($choices.Count) mode=$mode questionChars=$($question.Length)"
+        "ask_user parsed (v3): argKeys=[$argKeys] choices=$($choices.Count) fields=$($fields.Count) mode=$mode terminalOnly=$terminalOnly questionChars=$($question.Length)"
     )
 
     $sessionId = [string]$event.sessionId
@@ -101,7 +118,8 @@ try {
     # card on completion. It also carries the combo mapping so a multi-field choice can
     # be reported field by field.
     Write-CopilotDecisionMarker -SessionId $sessionId -DecisionId $decisionId `
-        -Question $question -Choices $choices -Combos $combos -Fields $fields -Mode $mode
+        -Question $question -Choices $choices -Combos $combos -Fields $fields `
+        -TerminalOnly:$terminalOnly -Mode $mode
 
     # Notify. Both paths (terminal and Home Assistant) are now open.
     if ($choices.Count -gt 0) {

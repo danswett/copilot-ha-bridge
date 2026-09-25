@@ -100,6 +100,60 @@ Test-That 'there is no longer a standalone toggle card beside the summary' {
 Write-Host '--- a live session produces a card ---'
 Test-That 'the control cards plus a session card are present' { @($cfg.views[0].cards).Count -ge 3 }
 
+Write-Host '--- the session renders as one card, not a stack of loose ones ---'
+$sessionCard = @($cfg.views[0].cards | Where-Object {
+    $_.type -eq 'vertical-stack' -and @($_.cards | Where-Object { $_.type -eq 'markdown' -and $_.content -match 'my task' }).Count -gt 0
+})[0]
+Test-That 'the session card exists' { $null -ne $sessionCard }
+Test-That 'the stack itself carries the border and background' {
+    $sessionCard.card_mod.style -match ':host' -and
+    $sessionCard.card_mod.style -match 'background' -and
+    $sessionCard.card_mod.style -match 'border'
+}
+Test-That 'the state glow moved onto the stack' {
+    $sessionCard.card_mod.style -match 'cpwait' -and $sessionCard.card_mod.style -match 'cpwork'
+}
+Test-That 'the gaps between sections are collapsed' {
+    $sessionCard.card_mod.style -match 'margin-top:\s*0'
+}
+$sessionHeader = @($sessionCard.cards | Where-Object { $_.type -eq 'markdown' })[0]
+Test-That 'the header no longer draws its own border' {
+    $sessionHeader.card_mod.style -match 'border:\s*none'
+}
+Test-That 'the header no longer owns the glow' {
+    $sessionHeader.card_mod.style -notmatch 'cpwait'
+}
+Test-That 'every inner card is transparent so one surface shows through' {
+    $inner = @($sessionCard.cards | Where-Object { $_.type -in @('markdown', 'conditional') })
+    $styled = foreach ($c in $inner) {
+        if ($c.type -eq 'conditional') { $c.card.card_mod.style } else { $c.card_mod.style }
+    }
+    @($styled | Where-Object { $_ -notmatch 'background:\s*none' }).Count -eq 0
+}
+
+Write-Host '--- End session is a footer, well away from Send ---'
+$stop = $sessionCard.cards[-1]
+Test-That 'End session is the last thing on the card' { $stop.entity -match '_stop$' }
+Test-That 'it is separated by a hairline rather than butting up to Send' {
+    @($stop.styles.card | Where-Object { $_.ContainsKey('border-top') }).Count -gt 0
+}
+Test-That 'it is left-aligned, unlike the right-aligned Send button' {
+    @($stop.styles.grid | Where-Object { $_.ContainsKey('justify-items') -and $_['justify-items'] -eq 'start' }).Count -gt 0
+}
+Test-That 'it is rendered muted rather than as a primary action' {
+    @($stop.styles.name | Where-Object { $_.ContainsKey('color') -and $_['color'] -match 'secondary-text-color' }).Count -gt 0
+}
+Test-That 'Send and End are not in the same row' {
+    $replyRow = @($sessionCard.cards | Where-Object { $_.type -eq 'custom:layout-card' })[0]
+    $inRow = @($replyRow.cards | ForEach-Object { if ($_.ContainsKey('entity')) { [string]$_['entity'] } else { '' } })
+    ($inRow -join ' ') -notmatch '_stop'
+}
+Test-That 'Send is still in the reply row' {
+    $replyRow = @($sessionCard.cards | Where-Object { $_.type -eq 'custom:layout-card' })[0]
+    $inRow = @($replyRow.cards | ForEach-Object { if ($_.ContainsKey('entity')) { [string]$_['entity'] } else { '' } })
+    ($inRow -join ' ') -match '_submit'
+}
+
 Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) check(s) failed" -ForegroundColor Red
