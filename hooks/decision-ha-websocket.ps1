@@ -663,14 +663,14 @@ function Save-CopilotSessionDashboard {
     if ($IncludeProfile) {
         $newSessionRows += @{ entity = 'select.agent_bridge_new_profile'; name = 'Profile' }
     }
-    # Launch sits directly under the selectors, because they all carry a default and
-    # a launch therefore needs no input at all - open the card, press Launch. The
-    # opening prompt is genuinely optional and goes last so it stays out of that path.
-    $newSessionRows += @(
-        @{ entity = 'button.agent_bridge_new_session'; name = 'Launch' }
-        @{ entity = 'sensor.agent_bridge_new_session_result'; name = 'Last launch' }
-        @{ entity = 'text.agent_bridge_new_prompt'; name = 'Opening prompt (optional)' }
-    )
+    # Launch sits directly under the selectors, because they all carry a default and a
+    # launch therefore needs no input at all - open the card, press Launch.
+    #
+    # The result of the last launch and the optional opening prompt are deliberately
+    # not shown. The launch itself is visible within seconds as a new session card, so
+    # restating it only adds a row that is stale most of the time, and the prompt was
+    # an input nobody reached for on a card whose whole point is one press.
+    $newSessionRows += @{ entity = 'button.agent_bridge_new_session'; name = 'Launch' }
 
     # Starting a new session. Placed with the controls rather than among the session
     # cards because it belongs to the bridge, not to any one session, and it stays

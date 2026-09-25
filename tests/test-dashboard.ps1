@@ -268,6 +268,35 @@ Test-That 'the choice slots still carry their real options' {
 }
 
 Write-Host ''
+Write-Host '--- the new-session card is only what a launch needs ---'
+# The card exists to be one press: every selector carries a default. A "Last launch"
+# row restated something already visible within seconds as a new session card, and was
+# stale the rest of the time; the optional opening prompt was an input nobody reached
+# for on a card whose whole point is not needing any.
+Save-CopilotSessionDashboard -Sessions $sessions -IncludeProfile -IncludeResume
+$newCard = @($script:SavedConfig.views[0].cards | Where-Object {
+    $_.ContainsKey('title') -and $_['title'] -eq 'Start a new session'
+})[0]
+$newRows = @($newCard.entities | ForEach-Object {
+    if ($_.ContainsKey('entity')) { [string]$_['entity'] } else { '' }
+})
+
+Test-That 'the card is still generated' { $null -ne $newCard }
+Test-That 'it keeps the selectors and Launch' {
+    ($newRows -contains 'select.agent_bridge_new_resume') -and
+    ($newRows -contains 'select.agent_bridge_new_workspace') -and
+    ($newRows -contains 'select.agent_bridge_new_profile') -and
+    ($newRows -contains 'button.agent_bridge_new_session')
+}
+Test-That 'the last-launch result is gone' {
+    $newRows -notcontains 'sensor.agent_bridge_new_session_result'
+}
+Test-That 'the opening prompt is gone' {
+    $newRows -notcontains 'text.agent_bridge_new_prompt'
+}
+Test-That 'Launch is the last thing on the card' { $newRows[-1] -eq 'button.agent_bridge_new_session' }
+
+Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) check(s) failed" -ForegroundColor Red
     exit 1

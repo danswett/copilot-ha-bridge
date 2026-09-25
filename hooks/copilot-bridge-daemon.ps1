@@ -78,6 +78,10 @@ $script:DaemonConfig = @{
     # comfortably while costing nothing when the value is already there.
     ReplyCommitAttempts = 6
     ReplyCommitWaitMs = 500
+    # How long a Send press stays armed while the box is still empty, waiting for Home
+    # Assistant to commit what was typed. Long enough to cover a slow commit on a
+    # phone, short enough that it cannot fire at something typed much later.
+    ReplyPendingWindowSeconds = 45
     ResumeCacheSeconds = 180
     # How soon to retry after a fetch that failed or came back empty, rather than
     # waiting out the full interval with a list known to be wrong.
@@ -884,20 +888,53 @@ function Invoke-PendingReplies {
         }
         catch { }
 
-        if ($entry.PSObject.Properties['LastSubmitAt']) { $entry.LastSubmitAt = $press }
-        else { $entry | Add-Member -NotePropertyName LastSubmitAt -NotePropertyValue $press -Force }
-
         if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('unknown', 'unavailable')) {
-            # Say so rather than doing nothing. Silence here is indistinguishable from
-            # a broken button.
-            try {
-                Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Nothing to send' `
-                    -Extra @{ hint = 'Type a reply first, then press Send.' } -Headers $Headers
+            # The press is deliberately NOT consumed yet. Home Assistant commits a text
+            # entity when it loses focus, and on a phone that can land well after the
+            # tap on Send - later than it is worth blocking the loop to wait for. The
+            # daemon already watches the reply box, so the commit wakes it: leaving the
+            # press pending means that wake-up finds a press and a value together and
+            # sends it, instead of the press having been spent on an empty read and the
+            # user having to press again.
+            $pendingSince = if ($entry.PSObject.Properties['PendingSubmitSince']) {
+                [string]$entry.PendingSubmitSince
             }
-            catch { }
-            Write-DaemonLog -Message "send pressed for $($sessionId.Substring(0,8)) with an empty reply box"
+            else { '' }
+
+            if ($entry.PSObject.Properties['PendingSubmitAt'] -and
+                [string]$entry.PendingSubmitAt -eq $press -and
+                -not [string]::IsNullOrWhiteSpace($pendingSince)) {
+
+                $waited = ([DateTimeOffset]::Now - [DateTimeOffset]::Parse($pendingSince)).TotalSeconds
+                if ($waited -lt $script:DaemonConfig.ReplyPendingWindowSeconds) { continue }
+
+                # Waited long enough: the box really is empty. Consume the press and
+                # say so, rather than leaving it armed to fire at whatever gets typed
+                # next.
+                if ($entry.PSObject.Properties['LastSubmitAt']) { $entry.LastSubmitAt = $press }
+                else { $entry | Add-Member -NotePropertyName LastSubmitAt -NotePropertyValue $press -Force }
+                $entry.PendingSubmitAt = ''
+                $entry.PendingSubmitSince = ''
+
+                try {
+                    Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Nothing to send' `
+                        -Extra @{ hint = 'Type a reply first, then press Send.' } -Headers $Headers
+                }
+                catch { }
+                Write-DaemonLog -Message "send pressed for $($sessionId.Substring(0,8)) with an empty reply box"
+                continue
+            }
+
+            $entry | Add-Member -NotePropertyName PendingSubmitAt -NotePropertyValue $press -Force
+            $entry | Add-Member -NotePropertyName PendingSubmitSince `
+                -NotePropertyValue ([DateTimeOffset]::Now.ToString('o')) -Force
             continue
         }
+
+        if ($entry.PSObject.Properties['LastSubmitAt']) { $entry.LastSubmitAt = $press }
+        else { $entry | Add-Member -NotePropertyName LastSubmitAt -NotePropertyValue $press -Force }
+        $entry | Add-Member -NotePropertyName PendingSubmitAt -NotePropertyValue '' -Force
+        $entry | Add-Member -NotePropertyName PendingSubmitSince -NotePropertyValue '' -Force
 
         if ($entry.PSObject.Properties['LastReply']) {
             $entry.LastReply = $value
