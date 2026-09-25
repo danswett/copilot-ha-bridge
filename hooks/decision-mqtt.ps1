@@ -880,9 +880,15 @@ function Publish-CopilotMqttDecisionFields {
     }
 
     # Now set each dropdown's starting value. These are optimistic selects, so their
-    # state must be driven explicitly.
+    # state must be driven explicitly. A free-text field has no dropdown - it is
+    # answered through the reply box - so its slot is parked on 'Idle' like an unused
+    # one. Starting it on 'Choose...' left it holding a value that was not even in its
+    # own option list, so the dashboard's "hide while Idle" condition failed to hide
+    # it and a blank dropdown appeared between the real ones.
     for ($i = 1; $i -le $script:CopilotMqttMaxFields; $i++) {
-        $start = if ($i -le $Fields.Count) { 'Choose...' } else { 'Idle' }
+        $slotField = if ($i -le $Fields.Count) { $Fields[$i - 1] } else { $null }
+        $isChoiceSlot = ($null -ne $slotField) -and -not (Test-DecisionFieldIsText -Field $slotField)
+        $start = if ($isChoiceSlot) { 'Choose...' } else { 'Idle' }
         try {
             Invoke-HomeAssistantService -Domain 'select' -Service 'select_option' -Headers $Headers -Data @{
                 entity_id = (Get-CopilotMqttFieldEntityId -Node $node -Index $i)

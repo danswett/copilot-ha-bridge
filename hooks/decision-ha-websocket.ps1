@@ -835,18 +835,42 @@ ha-select, mwc-select { width: 100%; }
         # when arming and 'Idle' when clearing; keying off that state is what makes the
         # control appear exactly when it is usable. (An earlier version also excluded
         # 'Awaiting answer...', which hid the dropdown precisely when it was needed.)
+        # On a single-field question this selector *is* the answer. On a multi-field
+        # one the answer comes from the per-field dropdowns below and this carries
+        # only "Cancel request" - so labelling it "Answer" made it read as one more
+        # question to fill in, sitting right where the last field should be. The two
+        # cases are split by whether the first field slot is carrying options.
         $answerCard = @{
             type = 'conditional'
             conditions = @(
                 @{ condition = 'state'; entity = $decisionEntity; state_not = 'Idle' }
                 @{ condition = 'state'; entity = $decisionEntity; state_not = 'unknown' }
                 @{ condition = 'state'; entity = $decisionEntity; state_not = 'unavailable' }
+                @{ condition = 'state'; entity = "select.${node}_f1"; state = 'Idle' }
             )
             card = @{
                 type = 'entities'
                 show_header_toggle = $false
                 card_mod = @{ style = $selectRowCard }
                 entities = @(@{ entity = $decisionEntity; name = 'Answer'; card_mod = @{ style = $selectRow } })
+            }
+        }
+
+        $cancelCard = @{
+            type = 'conditional'
+            conditions = @(
+                @{ condition = 'state'; entity = $decisionEntity; state_not = 'Idle' }
+                @{ condition = 'state'; entity = $decisionEntity; state_not = 'unknown' }
+                @{ condition = 'state'; entity = $decisionEntity; state_not = 'unavailable' }
+                @{ condition = 'state'; entity = "select.${node}_f1"; state_not = 'Idle' }
+                @{ condition = 'state'; entity = "select.${node}_f1"; state_not = 'unknown' }
+                @{ condition = 'state'; entity = "select.${node}_f1"; state_not = 'unavailable' }
+            )
+            card = @{
+                type = 'entities'
+                show_header_toggle = $false
+                card_mod = @{ style = $selectRowCard }
+                entities = @(@{ entity = $decisionEntity; name = 'Cancel this request'; card_mod = @{ style = $selectRow } })
             }
         }
 
@@ -1072,7 +1096,7 @@ ha-card {
         @{
             type = 'vertical-stack'
             card_mod = @{ style = $sessionCardStyle }
-            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard, $sendStatusCard, $stopCard)
+            cards = @($header) + @($fieldCards) + @($answerCard, $cancelCard, $replyCard, $sendStatusCard, $stopCard)
         }
     }
 

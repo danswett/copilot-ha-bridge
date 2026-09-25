@@ -131,6 +131,39 @@ Test-That 'every inner card is transparent so one surface shows through' {
     @($styled | Where-Object { $_ -notmatch 'background:\s*none' }).Count -eq 0
 }
 
+Write-Host '--- the decision row says what it actually does ---'
+# On a multi-field question the per-field dropdowns carry the answer and this selector
+# offers only "Cancel request" - but it was still labelled "Answer", so it read as one
+# more question to fill in, sitting exactly where the last field should have been.
+$decisionRows = @($sessionCard.cards | Where-Object {
+    $_.type -eq 'conditional' -and $_.card.type -eq 'entities' -and
+    "$($_.card.entities[0].entity)" -match '_decision$'
+})
+Test-That 'there are two variants of the decision row' { $decisionRows.Count -eq 2 }
+
+$answerRow = @($decisionRows | Where-Object { $_.card.entities[0].name -eq 'Answer' })[0]
+$cancelRow = @($decisionRows | Where-Object { $_.card.entities[0].name -eq 'Cancel this request' })[0]
+Test-That 'one is Answer and the other is Cancel this request' {
+    $null -ne $answerRow -and $null -ne $cancelRow
+}
+Test-That 'Answer shows only when no field dropdown is in play' {
+    @($answerRow.conditions | Where-Object {
+        "$($_.entity)" -match '_f1$' -and "$($_.state)" -eq 'Idle'
+    }).Count -eq 1
+}
+Test-That 'Cancel shows only when a field dropdown is in play' {
+    @($cancelRow.conditions | Where-Object {
+        "$($_.entity)" -match '_f1$' -and "$($_.state_not)" -eq 'Idle'
+    }).Count -eq 1
+}
+Test-That 'so the two can never appear together' {
+    # Both variants key off the same signal, one on it and one against it, which is
+    # what makes them mutually exclusive.
+    $a = @($answerRow.conditions | Where-Object { "$($_.entity)" -match '_f1$' })[0]
+    $c = @($cancelRow.conditions | Where-Object { "$($_.entity)" -match '_f1$' })[0]
+    "$($a.entity)" -eq "$($c.entity)" -and "$($a.state)" -eq 'Idle' -and "$($c.state_not)" -eq 'Idle'
+}
+
 Write-Host '--- End session is a footer, well away from Send ---'
 $stop = $sessionCard.cards[-1]
 Test-That 'End session is the last thing on the card' { $stop.entity -match '_stop$' }
@@ -170,6 +203,47 @@ Test-That 'Send is still in the reply row' {
     $replyRow = @($sessionCard.cards | Where-Object { $_.type -eq 'custom:layout-card' })[0]
     $inRow = @($replyRow.cards | ForEach-Object { if ($_.ContainsKey('entity')) { [string]$_['entity'] } else { '' } })
     ($inRow -join ' ') -match '_submit'
+}
+
+Write-Host ''
+Write-Host '--- a free-text field leaves no empty dropdown behind ---'
+# A text field is answered through the reply box, not a dropdown, so its slot is
+# published with only the 'Idle' option. It was still *started* on 'Choose...', a value
+# not in its own option list, so the dashboard's "hide while Idle" condition failed and
+# a blank dropdown appeared between the real ones.
+$script:FieldStarts = @{}
+$script:FieldOptions = @{}
+function Publish-CopilotMqttMessage {
+    param([string]$Topic, [string]$Payload, [hashtable]$Headers, [switch]$Retain)
+    if ($Topic -match '/select/[^/]+/(f\d)/config$') {
+        $script:FieldOptions[$Matches[1]] = ($Payload | ConvertFrom-Json).options
+    }
+}
+function Invoke-HomeAssistantService {
+    param([string]$Domain, [string]$Service, [hashtable]$Headers, [hashtable]$Data)
+    if ("$($Data.entity_id)" -match '_(f\d)$') { $script:FieldStarts[$Matches[1]] = [string]$Data.option }
+}
+function Set-CopilotMqttEntityIds { param([string]$SessionId) }
+
+$mixedFields = @(
+    [pscustomobject]@{ Label = 'Glow';  Options = @('Amber', 'Blue'); IsText = $false }
+    [pscustomobject]@{ Label = 'Notes'; Options = @();                IsText = $true }
+    [pscustomobject]@{ Label = 'Pick';  Options = @('One', 'Two');    IsText = $false }
+)
+Publish-CopilotMqttDecisionFields -SessionId 'abc123de-f456-7890-abcd-ef1234567890' `
+    -SessionName 'S' -Machine 'BOX' -Fields $mixedFields -Headers @{ Authorization = '******' }
+
+Test-That 'the two choice fields start on Choose...' {
+    $script:FieldStarts['f1'] -eq 'Choose...' -and $script:FieldStarts['f3'] -eq 'Choose...'
+}
+Test-That 'the free-text slot is parked on Idle, like an unused one' {
+    $script:FieldStarts['f2'] -eq 'Idle' -and $script:FieldStarts['f4'] -eq 'Idle'
+}
+Test-That 'and its starting value is one of its own options' {
+    @($script:FieldOptions['f2']) -contains $script:FieldStarts['f2']
+}
+Test-That 'the choice slots still carry their real options' {
+    @($script:FieldOptions['f1']) -contains 'Amber' -and @($script:FieldOptions['f3']) -contains 'Two'
 }
 
 Write-Host ''
