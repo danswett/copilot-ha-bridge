@@ -209,6 +209,59 @@ $cleared = ($script:MqttMsgs | Where-Object { $_.Topic -match "/button/$node/sto
 Test-That 'retiring a session clears the stop button too' { $null -ne $cleared -and $cleared.Payload -eq '' }
 
 Write-Host ''
+Write-Host '--- reporting what Send did must not empty the card ---'
+# Set-CopilotMqttActivity replaces the whole attribute set, and the card header renders
+# the last response and the reasoning out of those attributes. Publishing a bare
+# "Sending..." therefore blanked both until the next transcript update happened to
+# restore them - visible as the card emptying and refilling on every Send.
+$script:PublishedSummary = ''
+$script:PublishedDetail = $null
+$script:CurrentAttributes = [pscustomobject]@{
+    response      = 'the last thing the agent said'
+    reasoning     = 'its chain of thought'
+    history       = 'earlier activity'
+    friendly_name = 'Activity'
+    icon          = 'mdi:robot'
+    hint          = 'stale hint from a previous action'
+}
+
+function Get-HomeAssistantState {
+    param([string]$EntityId, [hashtable]$Headers)
+    [pscustomobject]@{ state = 'Idle'; attributes = $script:CurrentAttributes }
+}
+function Set-CopilotMqttActivity {
+    param([string]$SessionId, [string]$Summary, $Detail, [hashtable]$Headers)
+    $script:PublishedSummary = $Summary
+    $script:PublishedDetail = $Detail
+}
+
+Set-DaemonTransientActivity -SessionId 'dddddddd-1111-2222-3333-444444444444' `
+    -Summary 'Sending...' -Headers $headers
+
+Test-That 'the status itself is published' { $script:PublishedSummary -eq 'Sending...' }
+Test-That 'the last response survives' {
+    $script:PublishedDetail['response'] -eq 'the last thing the agent said'
+}
+Test-That 'and so does the reasoning the card renders' {
+    $script:PublishedDetail['reasoning'] -eq 'its chain of thought' -and
+    $script:PublishedDetail['history'] -eq 'earlier activity'
+}
+Test-That 'stale detail from a previous action is dropped' {
+    -not $script:PublishedDetail.ContainsKey('hint')
+}
+Test-That "Home Assistant's own attributes are not echoed back" {
+    -not $script:PublishedDetail.ContainsKey('friendly_name') -and
+    -not $script:PublishedDetail.ContainsKey('icon')
+}
+
+Set-DaemonTransientActivity -SessionId 'dddddddd-1111-2222-3333-444444444444' `
+    -Summary 'Reply sent' -Extra @{ sent = 'hello' } -Headers $headers
+Test-That 'new detail is carried alongside what was preserved' {
+    $script:PublishedDetail['sent'] -eq 'hello' -and
+    $script:PublishedDetail['response'] -eq 'the last thing the agent said'
+}
+
+Write-Host ''
 Write-Host '--- a mis-delivered answer is corrected, not just logged ---'
 # A warning on the card is not enough: the agent carries straight on from the wrong
 # answer, and the next activity update overwrites the warning within seconds.
