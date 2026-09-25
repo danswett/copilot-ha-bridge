@@ -582,6 +582,28 @@ Test-That 'an expired cache refetches' { $script:AgencyJsonCalls -eq 2 }
 $null = Get-DaemonResumableSessions -LiveSessionIds @() -Force
 Test-That 'a forced refresh refetches' { $script:AgencyJsonCalls -eq 3 }
 
+# Launching a session spawns Agency, and a concurrent `hub list-local-sessions`
+# returns nothing. Caching that as truth emptied the resume dropdown for minutes.
+Reset-ResumeCache
+Set-AgencySessions -Sessions @(
+    @{ session_id = 'f0f0f0f0-1111-2222-3333-444444444444'; summary = 'Earlier work'; folder = $beta; can_resume = $true; updated_at = '2026-09-23T10:00:00Z' }
+)
+$good = @(Get-DaemonResumableSessions -LiveSessionIds @())
+Test-That 'a good fetch populates the list' { $good.Count -eq 1 }
+
+$script:AgencyJson = '{"sessions":[]}'
+$stillGood = @(Get-DaemonResumableSessions -LiveSessionIds @() -Force)
+Test-That 'an empty fetch does not wipe a list that had entries' { $stillGood.Count -eq 1 }
+Test-That 'and it retries sooner than the full interval' {
+    ([DateTimeOffset]::Now - $script:DaemonResumeCacheAt).TotalSeconds -gt $script:DaemonConfig.ResumeRetrySeconds
+}
+
+Reset-ResumeCache
+$script:AgencyJson = '{"sessions":[]}'
+Test-That 'an empty fetch with nothing cached is simply empty' {
+    @(Get-DaemonResumableSessions -LiveSessionIds @()).Count -eq 0
+}
+
 Write-Host ''
 Write-Host '--- press handling, continued ---'
 $script:AgencyJson = ''

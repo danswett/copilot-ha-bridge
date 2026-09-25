@@ -74,6 +74,9 @@ $script:DaemonConfig = @{
     # on the machine, so it is cached for this long instead of being repeated on
     # every reconcile.
     ResumeCacheSeconds = 180
+    # How soon to retry after a fetch that failed or came back empty, rather than
+    # waiting out the full interval with a list known to be wrong.
+    ResumeRetrySeconds = 20
 }
 
 # Session-set signature of the last dashboard rebuild, so the dashboard is only
@@ -1639,12 +1642,28 @@ function Get-DaemonResumableSessions {
     $age = ([DateTimeOffset]::Now - $script:DaemonResumeCacheAt).TotalSeconds
     if ($Force.IsPresent -or $age -ge $script:DaemonConfig.ResumeCacheSeconds) {
         try {
-            $script:DaemonResumeCache = @(Get-BridgeResumableSessions)
-            $script:DaemonResumeCacheAt = [DateTimeOffset]::Now
+            $fetched = @(Get-BridgeResumableSessions)
+
+            # An empty result is treated as a failed fetch, not as truth, whenever a
+            # previous fetch found something. Launching a session spawns Agency, and a
+            # `hub list-local-sessions` running at that moment comes back with
+            # nothing - which was then cached as authoritative for the full interval,
+            # emptying the resume dropdown for minutes at a time. A machine that had
+            # sessions a moment ago still has them.
+            if ($fetched.Count -eq 0 -and @($script:DaemonResumeCache).Count -gt 0) {
+                $script:DaemonResumeCacheAt = [DateTimeOffset]::Now.AddSeconds(
+                    -$script:DaemonConfig.ResumeCacheSeconds + $script:DaemonConfig.ResumeRetrySeconds)
+                Write-DaemonLog -Message 'resumable session list came back empty; keeping the previous one and retrying shortly'
+            }
+            else {
+                $script:DaemonResumeCache = $fetched
+                $script:DaemonResumeCacheAt = [DateTimeOffset]::Now
+            }
         }
         catch {
             Write-DaemonLog -Message "resumable session list failed: $($_.Exception.Message)"
-            $script:DaemonResumeCacheAt = [DateTimeOffset]::Now
+            $script:DaemonResumeCacheAt = [DateTimeOffset]::Now.AddSeconds(
+                -$script:DaemonConfig.ResumeCacheSeconds + $script:DaemonConfig.ResumeRetrySeconds)
         }
     }
 
