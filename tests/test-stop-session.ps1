@@ -336,6 +336,52 @@ Test-That 'an unpressed button sends nothing and says nothing' {
 Remove-Item -LiteralPath $testLogFile -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
+Write-Host '--- a value committed just after the press is still sent ---'
+# Home Assistant commits a text entity when it loses focus, and the tap that commits
+# it IS the tap on Send. The daemon is woken by the button's own state change, so it
+# reads the box before the typed value lands - and a single short re-read meant the
+# first Send of a message reported "Nothing to send" and needed pressing twice.
+$script:ReadCount = 0
+$script:LateValue = 'typed just before pressing Send'
+$script:BlankReads = 3
+
+function Get-HomeAssistantState {
+    param([string]$EntityId, [hashtable]$Headers)
+    if ($EntityId -match '_reply$') {
+        $script:ReadCount++
+        $v = if ($script:ReadCount -le $script:BlankReads) { ' ' } else { $script:LateValue }
+        return [pscustomobject]@{ state = $v; attributes = [pscustomobject]@{ question = '' } }
+    }
+    if (-not $script:HaStates.ContainsKey($EntityId)) { throw "no such entity $EntityId" }
+    [pscustomobject]@{ state = $script:HaStates[$EntityId]; attributes = [pscustomobject]@{ question = '' } }
+}
+
+# Keep the test fast; the ratio of attempts to blank reads is what matters.
+$script:DaemonConfig.ReplyCommitWaitMs = 1
+
+$ctx = Reset-SendTest -Press '2026-06-01T13:00:00+00:00' -Reply ' '
+$script:ReadCount = 0
+Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
+Test-That 'a late commit is picked up rather than reported as empty' {
+    $script:Replies -contains $script:LateValue
+}
+Test-That 'and it is not reported as nothing to send' {
+    $script:Activity -notcontains 'Nothing to send'
+}
+
+# A box that never fills must still give up and say so, rather than polling forever.
+$script:BlankReads = 999
+$ctx = Reset-SendTest -Press '2026-06-01T13:05:00+00:00' -Reply ' '
+$script:ReadCount = 0
+Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
+Test-That 'a genuinely empty box still reports nothing to send' {
+    $script:Activity -contains 'Nothing to send'
+}
+Test-That 'and it stops after the configured number of attempts' {
+    $script:ReadCount -le ($script:DaemonConfig.ReplyCommitAttempts + 1)
+}
+
+Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) check(s) failed" -ForegroundColor Red
     exit 1

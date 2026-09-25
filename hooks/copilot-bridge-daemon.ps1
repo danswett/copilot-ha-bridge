@@ -73,6 +73,11 @@ $script:DaemonConfig = @{
     # The resumable-session list comes from an Agency call that reads every session
     # on the machine, so it is cached for this long instead of being repeated on
     # every reconcile.
+    # How long to keep polling the reply box after Send is pressed, waiting for Home
+    # Assistant to commit what was typed. Six attempts at 500ms covers the commit
+    # comfortably while costing nothing when the value is already there.
+    ReplyCommitAttempts = 6
+    ReplyCommitWaitMs = 500
     ResumeCacheSeconds = 180
     # How soon to retry after a fetch that failed or came back empty, rather than
     # waiting out the full interval with a list known to be wrong.
@@ -848,9 +853,22 @@ function Invoke-PendingReplies {
         }
         $value = [string]$replyState.state
 
-        # Give the commit a moment to land before concluding there is nothing to send.
-        if ([string]::IsNullOrWhiteSpace($value) -or $value -in @('unknown', 'unavailable')) {
-            Start-Sleep -Milliseconds 700
+        # Give the commit time to land before concluding there is nothing to send.
+        #
+        # Home Assistant commits a text entity when it loses focus, and the tap that
+        # commits it IS the tap on Send. The daemon is woken by the button's own state
+        # change, so it reads the box within milliseconds of the press - reliably
+        # before the typed value has landed. A single short re-read was not enough:
+        # the first Send of a message regularly reported "Nothing to send" and it took
+        # a second press to get through.
+        #
+        # Polling briefly costs nothing when the value is already there, which is the
+        # common case on the reconcile sweep.
+        $attempts = 0
+        while (($attempts -lt $script:DaemonConfig.ReplyCommitAttempts) -and
+               ([string]::IsNullOrWhiteSpace($value) -or $value -in @('unknown', 'unavailable'))) {
+            $attempts++
+            Start-Sleep -Milliseconds $script:DaemonConfig.ReplyCommitWaitMs
             try {
                 $replyState = Get-HomeAssistantState -EntityId $replyEntity -Headers $Headers
                 $value = [string]$replyState.state
