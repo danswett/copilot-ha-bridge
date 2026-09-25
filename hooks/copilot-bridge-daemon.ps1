@@ -700,6 +700,50 @@ function Get-ActivityFromEvents {
     }
 }
 
+function Set-DaemonTransientActivity {
+    <#
+        Reports something the user just did, without losing what the card was showing.
+
+        Set-CopilotMqttActivity replaces the attribute set, and the header renders the
+        last response, the reasoning and the activity history out of those attributes.
+        Publishing a bare "Sending..." therefore blanked the response and the
+        chain-of-thought until the next transcript update happened to restore them -
+        visible as the card emptying and then refilling on every Send.
+
+        Reading the current attributes and merging keeps the card intact while the
+        status line underneath reports progress.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [Parameter(Mandatory)][string]$Summary,
+        [hashtable]$Extra = @{},
+        [Parameter(Mandatory)][hashtable]$Headers
+    )
+
+    $attributes = @{}
+    try {
+        $node = Get-CopilotMqttNodeId -SessionId $SessionId
+        $current = Get-HomeAssistantState -EntityId "sensor.${node}_activity" -Headers $Headers
+        foreach ($property in $current.attributes.PSObject.Properties) {
+            # Home Assistant adds these itself; echoing them back is noise.
+            if ($property.Name -in @('friendly_name', 'icon', 'device_class', 'unit_of_measurement')) { continue }
+            $attributes[$property.Name] = $property.Value
+        }
+    }
+    catch {
+        # No current attributes to preserve; publish just the new ones.
+    }
+
+    # Status detail from a previous action would otherwise linger beside a new one and
+    # describe the wrong thing.
+    foreach ($key in @('error', 'hint', 'waiting_on', 'sent', 'unsent', 'recorded', 'answer', 'at')) {
+        [void]$attributes.Remove($key)
+    }
+    foreach ($key in $Extra.Keys) { $attributes[$key] = $Extra[$key] }
+
+    Set-CopilotMqttActivity -SessionId $SessionId -Summary $Summary -Detail $attributes -Headers $Headers
+}
+
 function Invoke-PendingReplies {
     <#
         Delivers any reply box that currently holds text.
@@ -723,29 +767,53 @@ function Invoke-PendingReplies {
     foreach ($sessionId in @($State.Keys)) {
         if (-not $Live.ContainsKey($sessionId)) { continue }
 
-        # A session with a pending-decision marker is answering an ask_user, not
-        # continuing a finished turn. Its reply box is owned by Invoke-PendingDecisions,
-        # which injects the answer into the live native prompt. Skip it here so the two
-        # paths never both inject the same text.
-        if ($null -ne (Get-CopilotDecisionMarker -SessionId $sessionId)) { continue }
-
+        $session = $Live[$sessionId]
         $node = Get-CopilotMqttNodeId -SessionId $sessionId
         $replyEntity = "text.${node}_reply"
+        $marker = Get-CopilotDecisionMarker -SessionId $sessionId
 
-        # Back-compat safety net for sessions still running the old blocking router.
-        # That router never writes a marker, so the marker check above does not protect
-        # it: the daemon would inject the reply the blocked hook is itself waiting for,
-        # which enqueues the text in the terminal and deadlocks the session. If the
-        # decision card holds a question but there is no marker, the session is on the
-        # old router — leave its reply box alone and let the hook consume it.
+        # Read the decision card once and decide who owns the reply box.
+        $armedQuestion = ''
         try {
             $decisionState = Get-HomeAssistantState -EntityId "select.${node}_decision" -Headers $Headers
-            if (-not [string]::IsNullOrWhiteSpace([string]$decisionState.attributes.question)) {
-                continue
-            }
+            $armedQuestion = [string]$decisionState.attributes.question
         }
         catch {
             # Unreadable decision state: treat the reply as a continuation, the common case.
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($armedQuestion)) {
+            if ($null -ne $marker) {
+                # A live question owns the reply box - Invoke-PendingDecisions reads it
+                # as the free-text field of the form, and reports there if the form is
+                # incomplete. Nothing to do here.
+                continue
+            }
+
+            # Armed card with no marker behind it. Either the old blocking router is
+            # genuinely waiting on it, or the question was already answered and the
+            # card was never torn down - in which case every reply typed here is
+            # dropped silently, which is how a session ends up unable to be replied to
+            # at all. The transcript settles it.
+            $stale = $false
+            try {
+                $askState = Get-CopilotAskUserState -TranscriptPath $session.Transcript
+                $stale = (-not $askState.Pending)
+            }
+            catch { }
+
+            if (-not $stale) { continue }
+
+            try {
+                Clear-CopilotMqttDecision -SessionId $sessionId `
+                    -SessionName ([string]$State[$sessionId].Name) `
+                    -Machine ([string]$State[$sessionId].Machine) -Headers $Headers
+                Write-DaemonLog -Message "cleared a stale decision card for $($sessionId.Substring(0,8)) so replies work again"
+            }
+            catch {
+                Write-DaemonLog -Message "could not clear the stale decision card for $sessionId : $($_.Exception.Message)"
+                continue
+            }
         }
 
         $entry = $State[$sessionId]
@@ -791,8 +859,7 @@ function Invoke-PendingReplies {
         # for even a second reads as a dead button, which is the other half of why it
         # got pressed twice.
         try {
-            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Sending...' `
-                -Detail @{ session = [string]$entry.Name } -Headers $Headers
+            Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Sending...' -Headers $Headers
         }
         catch { }
 
@@ -803,8 +870,8 @@ function Invoke-PendingReplies {
             # Say so rather than doing nothing. Silence here is indistinguishable from
             # a broken button.
             try {
-                Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Nothing to send' `
-                    -Detail @{ session = [string]$entry.Name; hint = 'Type a reply first, then press Send.' } -Headers $Headers
+                Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Nothing to send' `
+                    -Extra @{ hint = 'Type a reply first, then press Send.' } -Headers $Headers
             }
             catch { }
             Write-DaemonLog -Message "send pressed for $($sessionId.Substring(0,8)) with an empty reply box"
@@ -946,8 +1013,8 @@ function Invoke-PendingDecisions {
                         -ResultContent ([string]$askState.ResultContent) `
                         -Fields @($marker.fields) -Selections $injected)) {
                     Write-DaemonLog -Message "MISMATCH for $($sessionId.Substring(0,8)): sent [$($injected -join ' | ')] but the CLI recorded something else"
-                    Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Answer may be wrong - check the terminal' `
-                        -Detail @{ sent = ($injected -join ' | '); recorded = ([string]$askState.ResultContent) } -Headers $Headers
+                    Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Answer may be wrong - check the terminal' `
+                        -Extra @{ sent = ($injected -join ' | '); recorded = ([string]$askState.ResultContent) } -Headers $Headers
                 }
             }
             catch { }
@@ -1028,16 +1095,27 @@ function Invoke-PendingDecisions {
                 }
                 else {
                     $picked = @()
+                    $missingChoice = $false
                     for ($fi = 1; $fi -le $markerFields.Count; $fi++) {
                         $markerField = $markerFields[$fi - 1]
 
                         # A free-text field has no dropdown - it is answered in the
                         # Reply box, which is what makes a mixed form answerable at
                         # all. Its slot is collapsed, so read the box instead.
+                        #
+                        # An empty box is a valid answer. A free-text field is usually
+                        # the optional "anything else?" one, and requiring it refused
+                        # perfectly good submissions: every dropdown chosen, nothing to
+                        # add, Send rejected. The prompt accepts an empty field the
+                        # same way the terminal does - by committing it untouched.
                         if (Test-DecisionFieldIsText -Field $markerField) {
-                            $rep = Get-HomeAssistantState -EntityId "text.${node}_reply" -Headers $Headers
-                            $v = [string]$rep.state
-                            if ([string]::IsNullOrWhiteSpace($v) -or $v -in @('unknown', 'unavailable')) { $picked = @(); break }
+                            $v = ''
+                            try {
+                                $rep = Get-HomeAssistantState -EntityId "text.${node}_reply" -Headers $Headers
+                                $v = [string]$rep.state
+                            }
+                            catch { }
+                            if ([string]::IsNullOrWhiteSpace($v) -or $v -in @('unknown', 'unavailable')) { $v = '' }
                             $picked += $v
                             continue
                         }
@@ -1045,9 +1123,13 @@ function Invoke-PendingDecisions {
                         $fs = Get-HomeAssistantState `
                             -EntityId (Get-CopilotMqttFieldEntityId -Node $node -Index $fi) -Headers $Headers
                         $v = [string]$fs.state
-                        if ($v -in @('Choose...', 'Idle', 'unknown', 'unavailable', '')) { $picked = @(); break }
+                        if ($v -in @('Choose...', 'Idle', 'unknown', 'unavailable', '')) {
+                            $missingChoice = $true
+                            break
+                        }
                         $picked += $v
                     }
+                    if ($missingChoice) { $picked = @() }
 
                     # Every field chosen is not enough: a multi-field answer is only
                     # sent when Submit is pressed, so selections can be reviewed and
@@ -1082,8 +1164,8 @@ function Invoke-PendingDecisions {
                             $missing += [string]$markerFields[$fi].Label
                         }
                         try {
-                            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Not sent - answer every field' `
-                                -Detail @{ waiting_on = ($missing -join ', ') } -Headers $Headers
+                            Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Not sent - answer every field' `
+                                -Extra @{ waiting_on = ($missing -join ', ') } -Headers $Headers
                         }
                         catch { }
                         Write-DaemonLog -Message "submit pressed for $($sessionId.Substring(0,8)) with fields still unanswered"
@@ -1101,8 +1183,8 @@ function Invoke-PendingDecisions {
                         # Acknowledge the press before the injection, which takes a
                         # noticeable moment for a multi-field form.
                         try {
-                            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Sending answer...' `
-                                -Detail @{ answer = ($picked -join ' + ') } -Headers $Headers
+                            Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Sending answer...' `
+                                -Extra @{ answer = ($picked -join ' + ') } -Headers $Headers
                         }
                         catch { }
                     }
@@ -1201,16 +1283,16 @@ function Invoke-DaemonDecisionAnswer {
         try {
             $shown = ($Answer -replace '\s+', ' ').Trim()
             if ($shown.Length -gt 60) { $shown = $shown.Substring(0, 57) + '...' }
-            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Answer sent' `
-                -Detail @{ answer = $shown; at = [DateTimeOffset]::Now.ToString('HH:mm:ss') } -Headers $Headers
+            Set-DaemonTransientActivity -SessionId $SessionId -Summary 'Answer sent' `
+                -Extra @{ answer = $shown; at = [DateTimeOffset]::Now.ToString('HH:mm:ss') } -Headers $Headers
         }
         catch { }
         Write-DaemonLog -Message "decision answer injected to $short (pid $($delivery.ProcessId)): $($delivery.Detail)"
     }
     else {
         try {
-            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Answer NOT sent' `
-                -Detail @{ error = [string]$delivery.Detail } -Headers $Headers
+            Set-DaemonTransientActivity -SessionId $SessionId -Summary 'Answer NOT sent' `
+                -Extra @{ error = [string]$delivery.Detail } -Headers $Headers
         }
         catch { }
         Write-DaemonLog -Message "decision answer injection FAILED for $short : $($delivery.Detail)"
@@ -1412,8 +1494,8 @@ function Invoke-PendingStops {
         Write-DaemonLog -Message "end requested for $short (pid $processId)"
 
         try {
-            Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Ending session...' `
-                -Detail @{ session = [string]$entry.Name } -Headers $Headers
+            Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Ending session...' `
+                -Headers $Headers
         }
         catch { }
 
@@ -1451,8 +1533,8 @@ function Invoke-PendingStops {
         else {
             Write-DaemonLog -Message "could not end $short : $($stop.Detail)"
             try {
-                Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Could not end session' `
-                    -Detail @{ session = [string]$entry.Name; error = [string]$stop.Detail } -Headers $Headers
+                Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Could not end session' `
+                    -Extra @{ error = [string]$stop.Detail } -Headers $Headers
             }
             catch { }
         }
@@ -2477,12 +2559,12 @@ function Invoke-DaemonReply {
         $preview = ($Text -replace '\s+', ' ').Trim()
         if ($preview.Length -gt 60) { $preview = $preview.Substring(0, 57) + '...' }
         if ($delivery.Delivered) {
-            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Reply sent' `
-                -Detail @{ sent = $preview; at = [DateTimeOffset]::Now.ToString('HH:mm:ss') } -Headers $Headers
+            Set-DaemonTransientActivity -SessionId $SessionId -Summary 'Reply sent' `
+                -Extra @{ sent = $preview; at = [DateTimeOffset]::Now.ToString('HH:mm:ss') } -Headers $Headers
         }
         else {
-            Set-CopilotMqttActivity -SessionId $SessionId -Summary 'Reply NOT sent' `
-                -Detail @{ error = [string]$delivery.Detail; unsent = $preview } -Headers $Headers
+            Set-DaemonTransientActivity -SessionId $SessionId -Summary 'Reply NOT sent' `
+                -Extra @{ error = [string]$delivery.Detail; unsent = $preview } -Headers $Headers
         }
     }
     catch { }

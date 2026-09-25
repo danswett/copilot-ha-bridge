@@ -134,6 +134,24 @@ Test-That 'every inner card is transparent so one surface shows through' {
 Write-Host '--- End session is a footer, well away from Send ---'
 $stop = $sessionCard.cards[-1]
 Test-That 'End session is the last thing on the card' { $stop.entity -match '_stop$' }
+Test-That 'send feedback sits next to Send, not in the header' {
+    # The header is the first thing to scroll away on a long card, which is exactly
+    # when "Sending..." or "NOT sent" needs to be visible.
+    $idx = 0
+    $statusIdx = -1
+    $replyIdx = -1
+    foreach ($c in $sessionCard.cards) {
+        if ($c.type -eq 'custom:layout-card') { $replyIdx = $idx }
+        if ($c.type -eq 'conditional' -and $c.card.type -eq 'markdown' -and
+            "$($c.conditions[0].entity)" -match '_activity$') { $statusIdx = $idx }
+        $idx++
+    }
+    $statusIdx -gt $replyIdx -and $replyIdx -ge 0
+}
+Test-That 'it only shows while reporting on something you just did' {
+    $status = @($sessionCard.cards | Where-Object { $_.type -eq 'conditional' -and $_.card.type -eq 'markdown' })[0]
+    @($status.conditions[0].state) -contains 'Sending...' -and @($status.conditions[0].state) -contains 'Reply NOT sent'
+}
 Test-That 'it is separated by a hairline rather than butting up to Send' {
     @($stop.styles.card | Where-Object { $_.ContainsKey('border-top') }).Count -gt 0
 }

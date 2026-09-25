@@ -720,15 +720,9 @@ function Save-CopilotSessionDashboard {
         $decisionEntity = "select.${node}_decision"
         $replyEntity = "text.${node}_reply"
 
-        # The whole session is one card, not five stacked ones.
-        #
-        # Previously the chrome was inconsistent: the header carried the border and
-        # glow, the answer and end rows drew their own default card backgrounds, and
-        # the reply row was bare. Four different treatments in a column read as four
-        # loose cards rather than one session.
-        #
-        # So the border, background and state glow move to the stack itself, every
-        # child is stripped bare, and the stack's inter-card margins are collapsed.
+        # The whole session is one card, not five stacked ones. The border, background
+        # and state glow live on the stack; every child is stripped bare and the
+        # inter-card margins collapsed, so they read as sections of one surface.
         # `overflow: hidden` keeps the children's square corners inside the rounded
         # outer edge.
         $sessionCardStyle = @"
@@ -915,6 +909,11 @@ ha-card {
 
         $replyCard = @{
             type = 'custom:layout-card'
+            # The layout card draws its own surface. That went unnoticed while every
+            # sibling had one too, but against a single shared background it is the
+            # one element still rendering as a separate card - so it is stripped like
+            # the rest.
+            card_mod = @{ style = $bareChild }
             layout_type = 'custom:grid-layout'
             layout = @{
                 'grid-template-columns' = '1fr 56px'
@@ -974,6 +973,36 @@ ha-card {
                     }
                 }
             )
+        }
+
+        # Send feedback belongs next to Send, not in the header. The header is the
+        # first thing to scroll out of view on a card carrying a long response, which
+        # is precisely when a "Sending..." or "Reply NOT sent" needs to be seen.
+        #
+        # A conditional card rather than an always-present line: it appears only while
+        # the activity is reporting on something the user just did, so it does not add
+        # a permanently empty row to every card.
+        $sendStates = @(
+            'Sending...', 'Sending answer...', 'Nothing to send'
+            'Reply sent', 'Reply NOT sent'
+            'Answer sent', 'Answer NOT sent'
+            'Not sent - answer every field'
+            'Answer may be wrong - check the terminal'
+            'Ending session...', 'Could not end session'
+        )
+        $sendStatusCard = @{
+            type = 'conditional'
+            conditions = @(
+                @{ condition = 'state'; entity = $activityEntity; state = $sendStates }
+            )
+            card = @{
+                type = 'markdown'
+                card_mod = @{ style = $bareChild }
+                content = @"
+{% set a = states('$activityEntity') %}{% set d = state_attr('$activityEntity','error') %}{% set h = state_attr('$activityEntity','hint') %}{% set w = state_attr('$activityEntity','waiting_on') %}
+<span style="font-size:0.9em">{% if 'NOT' in a or 'Could not' in a or 'may be wrong' in a %}⚠️ {% elif 'sent' in a %}✅ {% else %}⏳ {% endif %}**{{ a }}**{% if w %} — {{ w }}{% elif h %} — {{ h }}{% elif d %} — {{ d }}{% endif %}</span>
+"@
+            }
         }
 
         # Ending the session, as a footer action rather than another control in the
@@ -1043,7 +1072,7 @@ ha-card {
         @{
             type = 'vertical-stack'
             card_mod = @{ style = $sessionCardStyle }
-            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard, $stopCard)
+            cards = @($header) + @($fieldCards) + @($answerCard, $replyCard, $sendStatusCard, $stopCard)
         }
     }
 
