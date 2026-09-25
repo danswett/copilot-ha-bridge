@@ -301,6 +301,43 @@ Test-Case 'nothing injected is not a mismatch' {
     Test-CopilotAnswerMatchesSelections -ResultContent 'anything' -Fields @() -Selections @()
 }
 
+Write-Host "`n--- a failed tool call must not kill the reconcile loop ---"
+# The failure this catches: a tool call that FAILED records `error` instead of
+# `result`, and reaching through `.result.content` makes StrictMode throw. That
+# terminating error propagated out of the daemon's reconcile loop, so one unrelated
+# failed tool anywhere in the transcript tail left every armed card unanswerable -
+# Send from Home Assistant silently did nothing. Seen live: the loop threw
+# "The property 'result' cannot be found on this object" every cycle for 3 minutes.
+$askTranscript = Join-Path ([IO.Path]::GetTempPath()) "bridge-askstate-$([guid]::NewGuid()).jsonl"
+@(
+    '{"type":"tool.execution_complete","timestamp":"2026-09-24T21:00:00Z","data":{"toolCallId":"failed-1","success":false,"error":{"message":"boom"}}}'
+    '{"type":"tool.execution_start","timestamp":"2026-09-24T21:01:00Z","data":{"toolName":"ask_user","toolCallId":"ask-1"}}'
+) | Set-Content -Path $askTranscript -Encoding UTF8
+
+Test-Case 'a failed tool call in the tail does not throw' {
+    # StrictMode is what turns the missing property into a terminating error, and the
+    # daemon runs under it (it leaks in from a dot-sourced library), so the test has
+    # to opt in or it cannot see the bug at all.
+    $state = & {
+        Set-StrictMode -Version Latest
+        Get-CopilotAskUserState -TranscriptPath $askTranscript
+    }
+    $state.Started -and $state.Pending -and $state.ToolCallId -eq 'ask-1'
+}
+
+Add-Content -Path $askTranscript -Encoding UTF8 -Value `
+    '{"type":"tool.execution_complete","timestamp":"2026-09-24T21:02:00Z","data":{"toolCallId":"ask-1","result":{"content":"User responded: a=B"}}}'
+
+Test-Case 'and the recorded answer is still captured once it completes' {
+    $state = & {
+        Set-StrictMode -Version Latest
+        Get-CopilotAskUserState -TranscriptPath $askTranscript
+    }
+    (-not $state.Pending) -and $state.ResultContent -eq 'User responded: a=B'
+}
+
+Remove-Item $askTranscript -Force -ErrorAction SilentlyContinue
+
 Write-Host "`n--- legacy shape must still work ---"
 
 Assert-Case -Name 'legacy question + choices array' -ExpectedQuestion 'Legacy question?' `

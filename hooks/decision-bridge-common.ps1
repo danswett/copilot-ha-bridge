@@ -1312,7 +1312,21 @@ function Get-CopilotAskUserState {
                 # checked against it. An arrow-key selection that lands one option
                 # short is otherwise indistinguishable from a correct one, and answers
                 # with the wrong choice in the user's name.
-                $results[$cid] = [string]$o.data.result.content
+                #
+                # A tool call that FAILED carries `error` instead of `result`. Reaching
+                # straight through `.result.content` makes StrictMode throw, and that
+                # terminating error kills the daemon's entire reconcile loop - so one
+                # unrelated failed tool anywhere in the transcript tail leaves every
+                # armed card unanswerable.
+                $content = ''
+                $data = $o.data
+                if ($null -ne $data -and $data.PSObject.Properties.Name -contains 'result') {
+                    $res = $data.result
+                    if ($null -ne $res -and $res.PSObject.Properties.Name -contains 'content') {
+                        $content = [string]$res.content
+                    }
+                }
+                $results[$cid] = $content
             }
         }
     }
