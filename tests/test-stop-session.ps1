@@ -377,9 +377,7 @@ $ctx = Reset-SendTest -Press '2026-06-01T12:05:00+00:00' -Reply ' '
 Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
 Test-That 'a press with an empty box sends nothing' { $script:Replies.Count -eq 0 }
 Test-That 'but still reports why, rather than looking dead' {
-    # The press is held briefly in case the typed value is still landing, so the
-    # acknowledgement is what shows first; the verdict follows once the wait is up.
-    $script:Activity -contains 'Sending...'
+    $script:Activity -contains 'Nothing to send'
 }
 
 $ctx = Reset-SendTest -Press 'unknown' -Reply 'text'
@@ -424,64 +422,17 @@ Test-That 'and it is not reported as nothing to send' {
     $script:Activity -notcontains 'Nothing to send'
 }
 
-# A box that never fills must still give up and say so, rather than waiting forever.
+# A box that never fills must still give up and say so, rather than polling forever.
 $script:BlankReads = 999
-$script:DaemonConfig.ReplyPendingWindowSeconds = 0
 $ctx = Reset-SendTest -Press '2026-06-01T13:05:00+00:00' -Reply ' '
 $script:ReadCount = 0
-Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
 Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
 Test-That 'a genuinely empty box still reports nothing to send' {
     $script:Activity -contains 'Nothing to send'
 }
 Test-That 'and it stops after the configured number of attempts' {
-    $script:ReadCount -le (($script:DaemonConfig.ReplyCommitAttempts + 1) * 2)
+    $script:ReadCount -le ($script:DaemonConfig.ReplyCommitAttempts + 1)
 }
-$script:DaemonConfig.ReplyPendingWindowSeconds = 45
-
-Write-Host ''
-Write-Host '--- a press that beats the typed text is not wasted ---'
-# Home Assistant commits a text entity when it loses focus, and on a phone that can
-# land seconds after the tap on Send - later than it is worth blocking the loop for.
-# Spending the press on that empty read is what forced a second press. The daemon
-# already watches the reply box, so the press stays armed and the commit's own
-# wake-up delivers it.
-$script:BlankReads = 999   # never commits during the in-loop poll
-$script:DaemonConfig.ReplyCommitWaitMs = 1
-
-$ctx = Reset-SendTest -Press '2026-06-01T14:00:00+00:00' -Reply ' '
-$script:ReadCount = 0
-Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
-Test-That 'nothing is sent while the box is still empty' { $script:Replies.Count -eq 0 }
-Test-That 'and it does not yet claim there is nothing to send' {
-    $script:Activity -notcontains 'Nothing to send'
-}
-
-# The text lands, and Home Assistant wakes the daemon because it watches the box.
-$script:BlankReads = 0
-$script:Activity = @()
-Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
-Test-That 'the same press then delivers, with no second press' {
-    $script:Replies -contains $script:LateValue
-}
-
-# A press on a genuinely empty box must still be consumed, or it would sit armed and
-# fire at whatever gets typed next.
-$script:BlankReads = 999
-$script:DaemonConfig.ReplyPendingWindowSeconds = 0
-$ctx = Reset-SendTest -Press '2026-06-01T14:10:00+00:00' -Reply ' '
-Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
-Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
-Test-That 'a press on a truly empty box eventually says so' {
-    $script:Activity -contains 'Nothing to send'
-}
-Test-That 'and it is consumed rather than left armed' {
-    $script:BlankReads = 0
-    $before = $script:Replies.Count
-    Invoke-PendingReplies -Headers $headers -State $ctx.State -Live $ctx.Live
-    $script:Replies.Count -eq $before
-}
-$script:DaemonConfig.ReplyPendingWindowSeconds = 45
 
 Write-Host ''
 if ($script:Failures) {
