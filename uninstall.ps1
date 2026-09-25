@@ -36,7 +36,7 @@ $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBr
           $(if ($TargetHome) { '_Sandbox' } else { '' })
 $bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
 $hooksDir = Join-Path $copilotHome 'hooks'
-$skillDir = Join-Path $copilotHome 'skills\decision-notifier'
+$legacySkillDir = Join-Path $copilotHome 'skills\decision-notifier'
 $configPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
 $taskName = 'CopilotBridgeDaemon'
 
@@ -135,9 +135,9 @@ foreach ($name in $files) {
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force; Write-Host "    $name" }
 }
 
-if (Test-Path -LiteralPath $skillDir) {
-    Write-Step 'Removing the decision-notifier skill'
-    Remove-Item -LiteralPath $skillDir -Recurse -Force
+if (Test-Path -LiteralPath $legacySkillDir) {
+    Write-Step 'Removing the obsolete decision-notifier skill'
+    Remove-Item -LiteralPath $legacySkillDir -Recurse -Force
 }
 
 $mcpDir = Join-Path $copilotHome 'mcp'

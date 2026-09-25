@@ -72,7 +72,7 @@ $versionFile = Join-Path $repoRoot 'VERSION'
 $version = if (Test-Path -LiteralPath $versionFile) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { '0.0.0' }
 $copilotHome = Join-Path $installHome '.copilot'
 $hooksDir = Join-Path $copilotHome 'hooks'
-$skillDir = Join-Path $copilotHome 'skills\decision-notifier'
+$legacySkillDir = Join-Path $copilotHome 'skills\decision-notifier'
 $configPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
 $hookConfigPath = Join-Path $hooksDir 'decision-notifier.json'
 $taskName = 'CopilotBridgeDaemon'
@@ -451,15 +451,22 @@ else {
     }
 }
 
+# Builds up to 1.4.2 shipped a decision-notifier skill. It never had frontmatter, so
+# Copilot never registered it, and any instruction telling the model to load it cost a
+# failed lookup plus a round of reasoning to rediscover that the preToolUse hook already
+# does the work. Remove it on upgrade rather than leaving the stale copy behind, whatever
+# clients are selected now.
+if (Test-Path -LiteralPath $legacySkillDir) {
+    Write-Step 'Removing the obsolete decision-notifier skill'
+    Remove-Item -LiteralPath $legacySkillDir -Recurse -Force
+    Write-Host "    $legacySkillDir"
+}
+
 # ------------------------------------------------------- configure Copilot CLI
 if ($selectedClients -contains 'copilot') {
     if (-not (Test-BridgeClientInstalled 'copilot')) {
         Write-Warning 'Copilot CLI was selected but is not on PATH; its hooks are written and will take effect once it is installed.'
     }
-
-    Write-Step 'Installing the decision-notifier skill'
-    if (-not (Test-Path -LiteralPath $skillDir)) { New-Item -ItemType Directory -Path $skillDir -Force | Out-Null }
-    Copy-Item (Join-Path $repoRoot 'skill\SKILL.md') $skillDir -Force
 
     Write-Step 'Merging Copilot hook definitions'
     $hookDefs = [ordered]@{

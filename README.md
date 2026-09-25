@@ -462,6 +462,70 @@ Get-Content $env:TEMP\copilot-bridge-daemon.log -Tail 20
 
 ---
 
+## Internals
+
+There is **nothing for a model to call**. The `preToolUse` hook fires on `ask_user` by
+itself, so no skill, tool or prompt instruction is needed — and builds up to 1.4.2 that
+installed a `decision-notifier` skill were wrong about this. That skill is removed on
+upgrade.
+
+### Question shapes
+
+Two `ask_user` argument shapes are handled. Current builds pass **`message`** plus a
+**`requestedSchema`** JSON-Schema form; older builds passed `question` plus a flat
+`choices` array. Options are derived from `requestedSchema.properties`, covering `enum`
+(with optional `enumNames`), `oneOf: [{const, title}]`, multi-select `items.enum` /
+`items.anyOf`, and `type: boolean` (Yes/No).
+
+* A **single-field** form becomes one dropdown.
+* A **multi-field** form (up to 4 fields) becomes one dropdown per field plus Send, so
+  every combination stays reachable without a combinatorial option list.
+* Larger forms fall back to freeform, with the question carrying a numbered outline of
+  every field and its options, marking any default.
+* Questions are carried up to 6,000 characters and each choice up to 600; anything
+  longer is truncated and the card says so.
+
+A malformed `ask_user` call is repaired before publishing. When a model fails to close
+the tool-call markup, the closing tag and later parameters get swallowed into the
+question string; the parser splits at the leak and reads the trailing payload — for both
+a leaked `choices` array and a leaked `requestedSchema`, including when either is cut off
+mid-write. Real arguments always win over recovered ones.
+
+### Where the work lives
+
+| File | Role |
+|---|---|
+| `decision-bridge-common.ps1` | Config loader, `ask_user` argument parsing and repair, REST helpers with retry/backoff |
+| `bridge-adapter.ps1` | Shared adapter orchestration reused by every client's hooks: the reachability gate, publish-on-demand, status/activity, notifications |
+| `decision-mqtt.ps1` | Per-session MQTT discovery: publish, arm/clear a decision, set status and activity, tear down |
+| `decision-ha-websocket.ps1` | Entity-registry reads and renames, scoped `subscribe_trigger` waits, dashboard generation |
+| `decision-inject.ps1` | `AttachConsole` + `WriteConsoleInput` delivery, with session→pid lookup from `inuse.<pid>.lock` |
+| `session-launch.ps1` | Starting a new CLI session: the workspace allowlist, argument quoting, and the launch itself |
+| `copilot-bridge-daemon.ps1` | The loop: reconcile sessions, stream activity, sweep orphans, deliver answers |
+| `copilot-bridge-supervisor.ps1` | Keeps one daemon alive with backoff; a named mutex prevents a second instance |
+| `route-ask-user-v3.ps1` | The non-blocking `ask_user` router |
+| `notify-agent-response.ps1` | Non-blocking response mirror + card |
+
+Logs: `%TEMP%\copilot-decision-bridge.log` (hooks), `%TEMP%\copilot-bridge-daemon.log`,
+`%TEMP%\copilot-bridge-supervisor.log`. Hook config changes reach a running CLI only
+after `/restart`; the daemon is shared and picks up new sessions on its own reconcile.
+
+### Design constraints worth knowing
+
+* The decision `select` and reply `text` are **optimistic** (no state topic) so a tap or
+  typed value sticks without a device echo. The cost is that they read `unknown` after a
+  Home Assistant restart; the daemon repairs them on its next reconcile.
+* Home Assistant derives an MQTT entity id from device name + entity name and **ignores
+  `object_id`**, so the bridge forces deterministic ids with
+  `config/entity_registry/update` → `new_entity_id`.
+* Waits use a scoped `subscribe_trigger`, **not** a broad `state_changed` subscription —
+  the latter floods the CPU.
+* The daemon must keep a **real** console for `AttachConsole` to work. It is launched
+  hidden via `copilot-bridge-launch.vbs` (`WScript.Shell.Run(..., 0, …)`). Do not switch
+  it to `conhost --headless`, which gives a pseudoconsole and breaks injection.
+
+---
+
 ## Other clients
 
 ### Claude Code — full support
