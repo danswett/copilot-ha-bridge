@@ -269,6 +269,38 @@ Test-Case 'a single free-text field stays plain freeform' {
     -not $p.TerminalOnly -and @($p.Choices).Count -eq 0
 }
 
+Write-Host "`n--- an injected answer is checked against what the CLI recorded ---"
+# The failure this catches: the injector drives an arrow-key list by index, so one
+# dropped keystroke selects the neighbouring option and the prompt reports it as the
+# user's choice. Seen live - a field picked as index 1 in Home Assistant came back
+# from the CLI as index 0 - and nothing downstream could tell.
+$checkFields = @(
+    [pscustomobject]@{ Label = 'Alignment'; Options = @('Aligned', 'Closer', 'No change'); IsText = $false }
+    [pscustomobject]@{ Label = 'Notes';     Options = @();                                  IsText = $true }
+)
+
+Test-Case 'a matching answer passes' {
+    Test-CopilotAnswerMatchesSelections `
+        -ResultContent 'User responded: alignment=Closer, notes=whatever they typed' `
+        -Fields $checkFields -Selections @('Closer', 'whatever they typed')
+}
+Test-Case 'the neighbouring option is caught' {
+    -not (Test-CopilotAnswerMatchesSelections `
+        -ResultContent 'User responded: alignment=Aligned, notes=whatever they typed' `
+        -Fields $checkFields -Selections @('Closer', 'whatever they typed'))
+}
+Test-Case 'a reworded free-text field is not treated as a mismatch' {
+    Test-CopilotAnswerMatchesSelections `
+        -ResultContent 'User responded: alignment=Closer, notes=trimmed differently' `
+        -Fields $checkFields -Selections @('Closer', '  trimmed differently  ')
+}
+Test-Case 'no recorded result yet is not a mismatch' {
+    Test-CopilotAnswerMatchesSelections -ResultContent '' -Fields $checkFields -Selections @('Closer', 'x')
+}
+Test-Case 'nothing injected is not a mismatch' {
+    Test-CopilotAnswerMatchesSelections -ResultContent 'anything' -Fields @() -Selections @()
+}
+
 Write-Host "`n--- legacy shape must still work ---"
 
 Assert-Case -Name 'legacy question + choices array' -ExpectedQuestion 'Legacy question?' `

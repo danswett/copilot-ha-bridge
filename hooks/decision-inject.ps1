@@ -109,6 +109,15 @@ namespace CopilotCli {
                 }
 
                 int typed = 0;
+                // Let the prompt settle before the first keystroke. Without this the
+                // very first Down was delivered the instant after AttachConsole and
+                // could be swallowed before the prompt was listening - which silently
+                // answered one option short. Observed: a field selected as index 1 in
+                // Home Assistant came back from the CLI as index 0, while a field
+                // needing no Down at all was correct, so every earlier test passed by
+                // accident.
+                Thread.Sleep(stepDelayMs * 4);
+
                 for (int f = 0; f < downCounts.Length; f++) {
                     string text = (texts != null && f < texts.Length) ? texts[f] : null;
 
@@ -134,10 +143,12 @@ namespace CopilotCli {
                     }
                     else {
                         for (int i = 0; i < downCounts[f]; i++) {
+                            // Pause *before* each press, not only after. The gap the
+                            // prompt needs is the one ahead of a keystroke.
+                            Thread.Sleep(stepDelayMs);
                             if (!WriteVirtualKey(handle, VK_DOWN)) {
                                 return "down-failed:" + Marshal.GetLastWin32Error();
                             }
-                            Thread.Sleep(stepDelayMs);
                         }
                     }
 

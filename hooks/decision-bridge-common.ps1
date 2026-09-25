@@ -1241,7 +1241,11 @@ function Set-CopilotDecisionMarkerInjected {
     #>
     param(
         [Parameter(Mandatory)][string]$SessionId,
-        [Parameter(Mandatory)][string]$Answer
+        [Parameter(Mandatory)][string]$Answer,
+
+        # The per-field option labels that were driven into the prompt, kept so the
+        # recorded answer can be checked against them once the tool completes.
+        [AllowNull()][AllowEmptyCollection()][string[]]$Selections = @()
     )
     $marker = Get-CopilotDecisionMarker -SessionId $SessionId
     if ($null -eq $marker) { return }
@@ -1249,6 +1253,7 @@ function Set-CopilotDecisionMarkerInjected {
     $obj = @{}
     foreach ($p in $marker.PSObject.Properties) { $obj[$p.Name] = $p.Value }
     $obj['injectedAnswer'] = $Answer
+    $obj['injectedSelections'] = @($Selections)
     Set-Content -LiteralPath $path -Value ($obj | ConvertTo-Json -Depth 8 -Compress) -Encoding UTF8
 }
 
@@ -1278,7 +1283,7 @@ function Get-CopilotAskUserState {
         [Parameter(Mandatory)][string]$TranscriptPath
     )
 
-    $result = [pscustomobject]@{ Started = $false; Pending = $false; ToolCallId = ''; StartedAt = $null }
+    $result = [pscustomobject]@{ Started = $false; Pending = $false; ToolCallId = ''; StartedAt = $null; ResultContent = '' }
 
     $lines = @(Get-CopilotTranscriptTailLines -Path $TranscriptPath)
     if ($lines.Count -eq 0) { return $result }
@@ -1287,6 +1292,7 @@ function Get-CopilotAskUserState {
     $latestStartId = ''
     $latestStartAt = $null
     $completed = @{}
+    $results = @{}
     foreach ($line in $lines) {
         if ($line -notmatch '"type":"tool\.execution_(start|complete)"') { continue }
         try {
@@ -1300,7 +1306,14 @@ function Get-CopilotAskUserState {
         }
         elseif ($o.type -eq 'tool.execution_complete') {
             $cid = [string]$o.data.toolCallId
-            if (-not [string]::IsNullOrWhiteSpace($cid)) { $completed[$cid] = $true }
+            if (-not [string]::IsNullOrWhiteSpace($cid)) {
+                $completed[$cid] = $true
+                # Keep the answer the CLI actually recorded, so an injected form can be
+                # checked against it. An arrow-key selection that lands one option
+                # short is otherwise indistinguishable from a correct one, and answers
+                # with the wrong choice in the user's name.
+                $results[$cid] = [string]$o.data.result.content
+            }
         }
     }
 
@@ -1309,7 +1322,41 @@ function Get-CopilotAskUserState {
     $result.ToolCallId = $latestStartId
     $result.StartedAt = $latestStartAt
     $result.Pending = -not $completed.ContainsKey($latestStartId)
+    if ($results.ContainsKey($latestStartId)) { $result.ResultContent = [string]$results[$latestStartId] }
     $result
+}
+
+function Test-CopilotAnswerMatchesSelections {
+    <#
+        Whether the answer the CLI recorded contains every option that was injected.
+
+        The injector drives an arrow-key list by index, so a single dropped keystroke
+        selects the neighbouring option and the prompt reports it as though the user
+        had chosen it. Nothing downstream can tell the difference, which makes it the
+        worst possible failure: a confident, wrong answer attributed to the user.
+
+        Comparing the recorded result against what was sent turns that into something
+        visible. Text fields are skipped - the CLI may reformat what was typed - so
+        this only asserts on the option labels, which are reproduced verbatim.
+    #>
+    param(
+        [AllowEmptyString()][string]$ResultContent,
+        [AllowNull()][AllowEmptyCollection()][object[]]$Fields,
+        [AllowNull()][AllowEmptyCollection()][string[]]$Selections
+    )
+
+    if ([string]::IsNullOrWhiteSpace($ResultContent)) { return $true }
+    $fieldList = @($Fields)
+    $selectionList = @($Selections)
+    if ($fieldList.Count -eq 0 -or $selectionList.Count -ne $fieldList.Count) { return $true }
+
+    for ($i = 0; $i -lt $fieldList.Count; $i++) {
+        if (Test-DecisionFieldIsText -Field $fieldList[$i]) { continue }
+        $wanted = [string]$selectionList[$i]
+        if ([string]::IsNullOrWhiteSpace($wanted)) { continue }
+        if ($ResultContent -notlike "*$wanted*") { return $false }
+    }
+    $true
 }
 
 function Get-CopilotTranscriptTailLines {

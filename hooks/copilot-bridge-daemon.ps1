@@ -933,7 +933,25 @@ function Invoke-PendingDecisions {
         if (-not $askState.Started) { continue }
 
         if (-not $askState.Pending) {
-            # Answered by whichever input got there first. Tear the card down.
+            # Answered by whichever input got there first. Before tearing the card
+            # down, check that an injected selection is the one the CLI recorded.
+            #
+            # The injector drives an arrow-key list by index, so a dropped keystroke
+            # selects the neighbouring option and the prompt reports it as the user's
+            # choice. Nothing downstream can tell - it is a confident wrong answer in
+            # the user's name - so it has to be caught here and said out loud.
+            try {
+                $injected = @($marker.injectedSelections)
+                if ($injected.Count -gt 0 -and -not (Test-CopilotAnswerMatchesSelections `
+                        -ResultContent ([string]$askState.ResultContent) `
+                        -Fields @($marker.fields) -Selections $injected)) {
+                    Write-DaemonLog -Message "MISMATCH for $($sessionId.Substring(0,8)): sent [$($injected -join ' | ')] but the CLI recorded something else"
+                    Set-CopilotMqttActivity -SessionId $sessionId -Summary 'Answer may be wrong - check the terminal' `
+                        -Detail @{ sent = ($injected -join ' | '); recorded = ([string]$askState.ResultContent) } -Headers $Headers
+                }
+            }
+            catch { }
+
             try {
                 Clear-CopilotMqttDecision -SessionId $sessionId `
                     -SessionName ([string]$State[$sessionId].Name) `
@@ -1174,7 +1192,7 @@ function Invoke-DaemonDecisionAnswer {
     }
 
     if ($delivery.Delivered) {
-        Set-CopilotDecisionMarkerInjected -SessionId $SessionId -Answer $Answer
+        Set-CopilotDecisionMarkerInjected -SessionId $SessionId -Answer $Answer -Selections @($Selections)
         try {
             Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers `
                 -Data @{ entity_id = "text.${node}_reply"; value = $script:DaemonConfig.ReplyBlankValue }
