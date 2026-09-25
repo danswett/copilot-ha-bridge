@@ -1018,6 +1018,26 @@ function Invoke-PendingDecisions {
                     Write-DaemonLog -Message "MISMATCH for $($sessionId.Substring(0,8)): sent [$($injected -join ' | ')] but the CLI recorded something else"
                     Set-DaemonTransientActivity -SessionId $sessionId -Summary 'Answer may be wrong - check the terminal' `
                         -Extra @{ sent = ($injected -join ' | '); recorded = ([string]$askState.ResultContent) } -Headers $Headers
+
+                    # Saying it on the card is not enough: the agent carries straight on
+                    # from the wrong answer, and the warning is overwritten by its next
+                    # activity update within seconds. So tell the session itself. Typed
+                    # text is the one delivery path that is reliable here - it is how
+                    # every reply is sent - which makes this correction land even though
+                    # the keystrokes that caused the problem did not.
+                    try {
+                        $correction = Get-DaemonAnswerCorrection -Fields @($marker.fields) -Selections $injected
+                        $fix = Send-CopilotSessionPrompt -SessionId $sessionId -Text $correction
+                        if ($fix.Delivered) {
+                            Write-DaemonLog -Message "sent a correction to $($sessionId.Substring(0,8)) with what was actually chosen"
+                        }
+                        else {
+                            Write-DaemonLog -Message "could not correct $($sessionId.Substring(0,8)): $($fix.Detail)"
+                        }
+                    }
+                    catch {
+                        Write-DaemonLog -Message "correction failed for $sessionId : $($_.Exception.Message)"
+                    }
                 }
             }
             catch { }
@@ -2536,6 +2556,42 @@ function Invoke-PendingCodexApprovals {
         }
         catch { }
     }
+}
+
+function Get-DaemonAnswerCorrection {
+    <#
+        Composes the message sent to a session whose answer was delivered wrongly.
+
+        The prompt is driven by arrow keys, and a keystroke that fails to register - or
+        registers twice - selects a different option and the CLI records it as the
+        user's choice. Nothing downstream can tell, so the agent proceeds confidently
+        on an answer the user never gave.
+
+        Naming both what was chosen and what to ignore matters: a bare restatement
+        reads like a new instruction, and the agent has no reason to connect it to the
+        question it just had answered.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Fields,
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Selections
+    )
+
+    $lines = for ($i = 0; $i -lt $Fields.Count -and $i -lt $Selections.Count; $i++) {
+        $label = [string]$Fields[$i].Label
+        $value = [string]$Selections[$i]
+        if ([string]::IsNullOrWhiteSpace($value)) { $value = '(left blank)' }
+        "  - $label : $value"
+    }
+
+    @(
+        'Correction from the Home Assistant bridge: the answer just recorded for your'
+        'last question is WRONG - it was mis-delivered to the prompt, not chosen by me.'
+        'Disregard it. What I actually selected was:'
+        ''
+        ($lines -join "`n")
+        ''
+        'Please continue using these values.'
+    ) -join "`n"
 }
 
 function Invoke-DaemonReply {

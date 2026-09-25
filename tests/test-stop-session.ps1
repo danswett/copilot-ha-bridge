@@ -209,6 +209,23 @@ $cleared = ($script:MqttMsgs | Where-Object { $_.Topic -match "/button/$node/sto
 Test-That 'retiring a session clears the stop button too' { $null -ne $cleared -and $cleared.Payload -eq '' }
 
 Write-Host ''
+Write-Host '--- a mis-delivered answer is corrected, not just logged ---'
+# A warning on the card is not enough: the agent carries straight on from the wrong
+# answer, and the next activity update overwrites the warning within seconds.
+$correctionFields = @(
+    [pscustomobject]@{ Label = 'Glow';  Options = @('Amber', 'Blue', 'No glow'); IsText = $false }
+    [pscustomobject]@{ Label = 'Notes'; Options = @();                           IsText = $true }
+)
+
+$msg = Get-DaemonAnswerCorrection -Fields $correctionFields -Selections @('No glow', '')
+Test-That 'it says the recorded answer is wrong' { $msg -match 'WRONG' -and $msg -match 'Disregard' }
+Test-That 'it names the field and the value actually chosen' { $msg -match 'Glow : No glow' }
+Test-That 'and marks an empty field as blank rather than dropping it' { $msg -match 'Notes : \(left blank\)' }
+Test-That 'it survives having no fields at all' {
+    $null -ne (Get-DaemonAnswerCorrection -Fields @() -Selections @())
+}
+
+Write-Host ''
 Write-Host '--- a follow-up typed while a reply is delivering must survive ---'
 # The failure this catches: delivery is not instant - a long reply is typed into the
 # console a character at a time - and the box was cleared unconditionally afterwards.
