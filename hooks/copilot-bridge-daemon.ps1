@@ -2588,15 +2588,34 @@ function Invoke-DaemonReply {
     }
     catch { }
 
-    # Clear the box either way, so a failed delivery is not silently resent. The
-    # reply box is an optimistic MQTT text entity with no state topic, so its value
+    # Clear the box either way, so a failed delivery is not silently resent - but only
+    # if it still holds what was just sent. Delivery is not instant (a long reply is
+    # typed into the console a character at a time), and clearing unconditionally wiped
+    # whatever the user had typed in the meantime. Their next Send then found an empty
+    # box and reported "Nothing to send", which is what being unable to queue a
+    # follow-up reply looks like from the dashboard.
+    #
+    # The reply box is an optimistic MQTT text entity with no state topic, so its value
     # is cleared with the text.set_value service, not by publishing to a state topic
     # that nothing is subscribed to.
     try {
         $node = Get-CopilotMqttNodeId -SessionId $SessionId
-        Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers -Data @{
-            entity_id = "text.${node}_reply"
-            value = $script:DaemonConfig.ReplyBlankValue
+        $current = $null
+        try {
+            $current = [string](Get-HomeAssistantState -EntityId "text.${node}_reply" -Headers $Headers).state
+        }
+        catch {
+            # Unreadable: fall through to the clear, which is the safer default.
+        }
+
+        if ($null -eq $current -or $current -eq $Text) {
+            Invoke-HomeAssistantService -Domain 'text' -Service 'set_value' -Headers $Headers -Data @{
+                entity_id = "text.${node}_reply"
+                value = $script:DaemonConfig.ReplyBlankValue
+            }
+        }
+        else {
+            Write-DaemonLog -Message "kept a follow-up reply typed for $short while the previous one was delivering"
         }
     }
     catch {

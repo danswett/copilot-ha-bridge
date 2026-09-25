@@ -209,6 +209,55 @@ $cleared = ($script:MqttMsgs | Where-Object { $_.Topic -match "/button/$node/sto
 Test-That 'retiring a session clears the stop button too' { $null -ne $cleared -and $cleared.Payload -eq '' }
 
 Write-Host ''
+Write-Host '--- a follow-up typed while a reply is delivering must survive ---'
+# The failure this catches: delivery is not instant - a long reply is typed into the
+# console a character at a time - and the box was cleared unconditionally afterwards.
+# A follow-up typed in that window was wiped, and the next Send reported "Nothing to
+# send". Seen live: ok:460 delivered, then an empty box 11 seconds later.
+$script:ClearCalls = @()
+$script:BoxValue = ''
+$script:Activity = @()
+
+function Get-LiveClaudeSessions { @{} }
+function Get-LiveCodexSessions { @{} }
+function Set-DaemonTransientActivity {
+    param([string]$SessionId, [string]$Summary, $Extra, [hashtable]$Headers)
+    $script:Activity += $Summary
+}
+function Get-HomeAssistantState {
+    param([string]$EntityId, [hashtable]$Headers)
+    [pscustomobject]@{ state = $script:BoxValue; attributes = [pscustomobject]@{ question = '' } }
+}
+function Invoke-HomeAssistantService {
+    param([string]$Domain, [string]$Service, [hashtable]$Headers, [hashtable]$Data)
+    $script:ClearCalls += [pscustomobject]@{ EntityId = $Data.entity_id; Value = $Data.value }
+}
+
+$replySession = 'cccccccc-1111-2222-3333-444444444444'
+
+$script:InjectResult = $true
+$script:BoxValue = 'the message that was just sent'
+$script:ClearCalls = @()
+[void](Invoke-DaemonReply -SessionId $replySession -Text 'the message that was just sent' -Headers $headers)
+Test-That 'the box is cleared when it still holds what was sent' {
+    $script:ClearCalls.Count -eq 1 -and $script:ClearCalls[0].Value -eq $script:DaemonConfig.ReplyBlankValue
+}
+
+$script:BoxValue = 'a follow-up typed while the first was delivering'
+$script:ClearCalls = @()
+[void](Invoke-DaemonReply -SessionId $replySession -Text 'the message that was just sent' -Headers $headers)
+Test-That 'but a follow-up typed in the meantime is left alone' { $script:ClearCalls.Count -eq 0 }
+
+$script:BoxValue = 'the message that was just sent'
+$script:ClearCalls = @()
+$script:InjectResult = $false
+[void](Invoke-DaemonReply -SessionId $replySession -Text 'the message that was just sent' -Headers $headers)
+Test-That 'a failed delivery still clears, so it is not silently resent' {
+    $script:ClearCalls.Count -eq 1
+}
+$script:InjectResult = $true
+
+Write-Host ''
 Write-Host '--- Send always says something ---'
 # A press that produces no visible change reads as a dead button, which is why it
 # was getting pressed twice. Every press now ends in a visible outcome.
