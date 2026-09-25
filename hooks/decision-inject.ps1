@@ -457,6 +457,52 @@ function Send-CopilotSessionPrompt {
     $result
 }
 
+function Get-BridgeFormPayloads {
+    <#
+        Turns a form's fields and chosen values into the exact sequence typed into the
+        prompt, one entry per field.
+
+        A choice field becomes its option's index expressed as repeated Down escape
+        sequences; a free-text field becomes the text itself. Each is committed with
+        Enter by the caller.
+
+        This is separated out because getting it wrong is silent: the prompt accepts
+        whatever arrives and reports it as the user's own answer. An empty payload for
+        a choice field does not fail - it just leaves that field on its first option.
+
+        Returns objects with Payload and IsText, in field order. Throws if a selection
+        is not one of its field's options.
+    #>
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Fields,
+        [Parameter(Mandatory)][AllowEmptyCollection()][AllowEmptyString()][string[]]$Selections
+    )
+
+    $esc = [string][char]27
+    for ($i = 0; $i -lt $Fields.Count; $i++) {
+        if (Test-DecisionFieldIsText -Field $Fields[$i]) {
+            # Normalised the same way a reply is: a newline mid-form would commit the
+            # field early and leave the rest of the prompt unanswered.
+            [pscustomobject]@{
+                Payload = [string](Get-CopilotInjectableText -Text ([string]$Selections[$i]))
+                IsText  = $true
+                Index   = 0
+            }
+            continue
+        }
+
+        $options = @($Fields[$i].Options | ForEach-Object { [string]$_ })
+        $idx = [Array]::IndexOf($options, [string]$Selections[$i])
+        if ($idx -lt 0) { throw "option '$($Selections[$i])' not found in field $i" }
+
+        [pscustomobject]@{
+            Payload = ($esc + '[B') * $idx
+            IsText  = $false
+            Index   = $idx
+        }
+    }
+}
+
 function Send-CopilotSessionForm {
     <#
         Answers the native ask_user prompt field by field.
@@ -500,36 +546,23 @@ function Send-CopilotSessionForm {
         return $result
     }
 
-    $downs = New-Object System.Collections.Generic.List[int]
-    $texts = New-Object System.Collections.Generic.List[string]
-    for ($i = 0; $i -lt $Fields.Count; $i++) {
-        if (Test-DecisionFieldIsText -Field $Fields[$i]) {
-            $downs.Add(0)
-            # Normalised the same way a reply is: a newline mid-form would commit the
-            # field early and leave the rest of the prompt unanswered.
-            $texts.Add((Get-CopilotInjectableText -Text ([string]$Selections[$i])))
-            continue
-        }
-
-        $options = @($Fields[$i].Options | ForEach-Object { [string]$_ })
-        $idx = [Array]::IndexOf($options, [string]$Selections[$i])
-        if ($idx -lt 0) {
-            $result.Detail = "option '$($Selections[$i])' not found in field $i"
-            return $result
-        }
-        $downs.Add($idx)
-        $texts.Add($null)
+    try {
+        $steps = @(Get-BridgeFormPayloads -Fields $Fields -Selections $Selections)
+    }
+    catch {
+        $result.Detail = $_.Exception.Message
+        return $result
     }
 
     # Record exactly what is about to be delivered to the prompt. When a field comes
     # back wrong, this is the difference between knowing the index was miscomputed and
     # knowing the keystrokes were mis-delivered.
     $trace = for ($i = 0; $i -lt $Fields.Count; $i++) {
-        if (Test-DecisionFieldIsText -Field $Fields[$i]) {
-            "$($Fields[$i].Label)=<typed $(([string]$Selections[$i]).Length) chars>"
+        if ($steps[$i].IsText) {
+            "$($Fields[$i].Label)=<typed $($steps[$i].Payload.Length) chars>"
         }
         else {
-            "$($Fields[$i].Label)='$($Selections[$i])' idx=$($downs[$i]) of [$(@($Fields[$i].Options) -join ',')]"
+            "$($Fields[$i].Label)='$($Selections[$i])' idx=$($steps[$i].Index) of [$(@($Fields[$i].Options) -join ',')]"
         }
     }
     $result.Detail = ($trace -join ' ; ')
@@ -543,11 +576,30 @@ function Send-CopilotSessionForm {
 
     try {
         Initialize-CopilotConsoleInjector
-        $outcome = [CopilotCli.ConsoleInjector]::SendForm(
-            [uint32]$processId, $downs.ToArray(), $texts.ToArray(), $StepDelayMs
-        )
+
+        # One attach-write-detach per FIELD, with that field's arrows and its
+        # committing Enter in the same call.
+        #
+        # Delivering the whole form inside a single attach did not work: the arrow
+        # moves were silently dropped and every choice field committed at its FIRST
+        # option, in the user's name. Splitting the arrows and the Enter into separate
+        # calls did not work either. What does work - verified repeatedly against a
+        # live prompt, on single-field and multi-field alike - is exactly this shape:
+        # the escape sequence and the Enter delivered together, as Send already does
+        # for a reply.
+        # One attach-write-detach per FIELD, with that field's arrows and its
+        # committing Enter delivered together - the same shape Send already uses for a
+        # reply, which is the delivery path with a long record of working.
+        $outcome = 'ok:form'
+        for ($i = 0; $i -lt $steps.Count; $i++) {
+            $r = [CopilotCli.ConsoleInjector]::Send(
+                [uint32]$processId, $steps[$i].Payload, $true, $StepDelayMs)
+            if (-not $r.StartsWith('ok')) { $outcome = "field${i}:$r"; break }
+            Start-Sleep -Milliseconds ($StepDelayMs * 2)
+        }
+
         $result.Detail = "$outcome | " + $result.Detail
-        $result.Delivered = $outcome.StartsWith('ok:')
+        $result.Delivered = $outcome.StartsWith('ok')
     }
     catch {
         $result.Detail = "exception: $($_.Exception.Message)"

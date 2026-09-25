@@ -7,6 +7,7 @@
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'hooks\decision-bridge-common.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'hooks\decision-inject.ps1')
 
 $script:Failures = 0
 
@@ -337,6 +338,45 @@ Test-Case 'and the recorded answer is still captured once it completes' {
 }
 
 Remove-Item $askTranscript -Force -ErrorAction SilentlyContinue
+
+Write-Host "`n--- every choice field actually gets its keystrokes ---"
+# The failure this catches is silent and severe: the per-field payloads were built by
+# putting $null in a List[string] to mean "this field is not typed", but PowerShell
+# stores that as an EMPTY STRING. Every choice field then looked like a typed field
+# with nothing to type, so no arrow was ever sent and each one committed at its FIRST
+# option - recorded by the CLI as the user's own choice, with nothing to show it was
+# wrong. Seen live three times: an answer of index 1 came back as index 0 each time.
+$esc = [string][char]27
+$formFields = @(
+    [pscustomobject]@{ Label = 'Glow';   Options = @('Amber', 'Blue', 'No glow'); IsText = $false }
+    [pscustomobject]@{ Label = 'Notes';  Options = @();                           IsText = $true }
+    [pscustomobject]@{ Label = 'Rigged'; Options = @('First', 'Second', 'Third'); IsText = $false }
+)
+$steps = @(Get-BridgeFormPayloads -Fields $formFields -Selections @('No glow', 'a note', 'Third'))
+
+Test-Case 'one payload per field' { $steps.Count -eq 3 }
+Test-Case 'a third option sends two Down sequences, not nothing' {
+    $steps[0].Payload -eq ($esc + '[B' + $esc + '[B') -and $steps[0].Payload.Length -eq 6
+}
+Test-Case 'the text field carries its text' {
+    $steps[1].IsText -and $steps[1].Payload -eq 'a note'
+}
+Test-Case 'and the last field gets its own presses' {
+    $steps[2].Payload -eq ($esc + '[B' + $esc + '[B') -and -not $steps[2].IsText
+}
+Test-Case 'a first option needs no presses' {
+    @(Get-BridgeFormPayloads -Fields @($formFields[0]) -Selections @('Amber'))[0].Payload -eq ''
+}
+Test-Case 'an empty text field stays empty without becoming a choice' {
+    $s = @(Get-BridgeFormPayloads -Fields @($formFields[1]) -Selections @(''))[0]
+    $s.IsText -and $s.Payload -eq ''
+}
+Test-Case 'an option that is not in the list is refused' {
+    $threw = $false
+    try { [void](Get-BridgeFormPayloads -Fields @($formFields[0]) -Selections @('Nope')) }
+    catch { $threw = $true }
+    $threw
+}
 
 Write-Host "`n--- legacy shape must still work ---"
 
