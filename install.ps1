@@ -477,6 +477,15 @@ if ($PSBoundParameters.ContainsKey('TickerCategory') -and $TickerCategory) {
     $config.notifications.tickerCategory = $TickerCategory
 }
 
+# Pre-rename configs pinned the old slug explicitly, which would leave the daemon
+# writing to /copilot-decisions forever. Only the old default is rewritten - a slug
+# the user actually chose is left alone.
+if ($config.PSObject.Properties['dashboard'] -and
+    [string]$config.dashboard.urlPath -eq 'copilot-decisions') {
+    $config.dashboard.urlPath = 'agent-decisions'
+    Write-Host '    dashboard slug: copilot-decisions -> agent-decisions'
+}
+
 # --------------------------------------------------------------- interactive
 # Fill in whatever is still missing by discovering Home Assistant and asking, so the
 # common case is running install.ps1 with no arguments at all.

@@ -296,6 +296,72 @@ Test-That 'the opening prompt is gone' {
 }
 Test-That 'Launch is the last thing on the card' { $newRows[-1] -eq 'button.agent_bridge_new_session' }
 
+Write-Host '--- the dashboard is provisioned before it is written to ---'
+# Invoke-CopilotHaWebSocket hands back each command's `result` already unwrapped, so
+# a caller that reaches for `.result` again finds nothing and silently creates no
+# dashboard - which left the daemon logging config_not_found on every rebuild.
+$script:SentCommands = @()
+function Invoke-CopilotHaWebSocket {
+    param([Parameter(Mandatory)][object[]]$Commands)
+    $script:SentCommands += $Commands[0]
+    if ($Commands[0].type -eq 'lovelace/dashboards/list') {
+        # Shaped the way the real helper returns it: the list itself, not a wrapper.
+        return , @(
+            [pscustomobject]@{ url_path = 'copilot-decisions'; id = 'old-id'; title = 'Agent Sessions' }
+            [pscustomobject]@{ url_path = 'lovelace'; id = 'home-id'; title = 'Home' }
+        )
+    }
+    @()
+}
+
+$script:BridgeDashboardReady = $false
+Initialize-BridgeDashboard
+
+$created = @($script:SentCommands | Where-Object { $_.type -eq 'lovelace/dashboards/create' })
+$deleted = @($script:SentCommands | Where-Object { $_.type -eq 'lovelace/dashboards/delete' })
+
+Test-That 'the target dashboard is created when it is missing' { $created.Count -eq 1 }
+Test-That 'it is created at the configured slug' {
+    $created[0].url_path -eq $script:DecisionBridgeConfig.DashboardUrlPath
+}
+Test-That 'it is created as Agent Sessions' { $created[0].title -eq 'Agent Sessions' }
+Test-That 'it is shown in the sidebar' { $created[0].show_in_sidebar }
+Test-That 'the pre-rename dashboard is removed' { $deleted.Count -eq 1 }
+Test-That 'it is removed by id, not by slug' { $deleted[0].dashboard_id -eq 'old-id' }
+Test-That 'the replacement is created before the old one is deleted' {
+    $types = @($script:SentCommands | ForEach-Object { $_.type })
+    [array]::IndexOf($types, 'lovelace/dashboards/create') -lt [array]::IndexOf($types, 'lovelace/dashboards/delete')
+}
+Test-That 'an unrelated dashboard is left alone' {
+    -not (@($deleted | Where-Object { $_.dashboard_id -eq 'home-id' }).Count)
+}
+
+Write-Host '--- provisioning happens once, not on every rebuild ---'
+$script:SentCommands = @()
+Initialize-BridgeDashboard
+Test-That 'a second call makes no further round trips' { $script:SentCommands.Count -eq 0 }
+
+Write-Host '--- an existing dashboard is left as it is ---'
+$script:SentCommands = @()
+$script:BridgeDashboardReady = $false
+function Invoke-CopilotHaWebSocket {
+    param([Parameter(Mandatory)][object[]]$Commands)
+    $script:SentCommands += $Commands[0]
+    if ($Commands[0].type -eq 'lovelace/dashboards/list') {
+        return , @([pscustomobject]@{
+            url_path = $script:DecisionBridgeConfig.DashboardUrlPath; id = 'cur'; title = 'Agent Sessions'
+        })
+    }
+    @()
+}
+Initialize-BridgeDashboard
+Test-That 'nothing is created when the dashboard already exists' {
+    -not (@($script:SentCommands | Where-Object { $_.type -eq 'lovelace/dashboards/create' }).Count)
+}
+Test-That 'nothing is deleted when there is no pre-rename dashboard' {
+    -not (@($script:SentCommands | Where-Object { $_.type -eq 'lovelace/dashboards/delete' }).Count)
+}
+
 Write-Host ''
 if ($script:Failures) {
     Write-Host "$($script:Failures) check(s) failed" -ForegroundColor Red

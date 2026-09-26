@@ -590,10 +590,13 @@ function Initialize-BridgeDashboard {
     $legacy = 'copilot-decisions'
 
     try {
-        $listed = Invoke-CopilotHaWebSocket -Commands @(@{ type = 'lovelace/dashboards/list' })
-        $dashboards = @($listed[0].result)
+        # Invoke-CopilotHaWebSocket already unwraps each command's `result`, so this is
+        # the dashboard list itself - indexing into `.result` again would find nothing.
+        $dashboards = @((Invoke-CopilotHaWebSocket -Commands @(
+            @{ type = 'lovelace/dashboards/list' }
+        ))[0])
 
-        if (-not ($dashboards | Where-Object { $_.url_path -eq $target })) {
+        if (-not (@($dashboards) | Where-Object { [string]$_.url_path -eq $target })) {
             [void](Invoke-CopilotHaWebSocket -Commands @(
                 @{
                     type = 'lovelace/dashboards/create'
@@ -604,16 +607,18 @@ function Initialize-BridgeDashboard {
                     require_admin = $false
                 }
             ))
+            Write-DecisionBridgeLog "created the '$target' dashboard"
         }
 
         # Only once the replacement is in place, so a failure part way through never
         # leaves the user with no dashboard at all.
         if ($target -ne $legacy) {
-            $stale = $dashboards | Where-Object { $_.url_path -eq $legacy } | Select-Object -First 1
+            $stale = @($dashboards) | Where-Object { [string]$_.url_path -eq $legacy } | Select-Object -First 1
             if ($stale) {
                 [void](Invoke-CopilotHaWebSocket -Commands @(
                     @{ type = 'lovelace/dashboards/delete'; dashboard_id = $stale.id }
                 ))
+                Write-DecisionBridgeLog "removed the pre-rename '$legacy' dashboard"
             }
         }
 
@@ -622,7 +627,7 @@ function Initialize-BridgeDashboard {
     catch {
         # A save against an existing dashboard still works, so this must never be
         # fatal - the next cycle retries.
-        Write-Verbose "Dashboard preparation failed: $($_.Exception.Message)"
+        Write-DecisionBridgeLog "dashboard preparation failed: $($_.Exception.Message)"
     }
 }
 
