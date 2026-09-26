@@ -1,12 +1,18 @@
 <#
-    Shared configuration and helpers for the Copilot <-> Home Assistant bridge.
+    Shared configuration and helpers for the AI coding agent <-> Home Assistant bridge.
 
-    Machine-specific settings live in a JSON config file outside this folder, because
-    Copilot parses every *.json under ~/.copilot/hooks as a hook definition and logs a
-    startup error for anything that is not one. Resolution order:
+    Machine-specific settings live in the bridge's own root rather than under
+    ~/.copilot, which belongs to the Copilot CLI - it parses every *.json under
+    ~/.copilot/hooks as a hook definition and logs a startup error for anything that is
+    not one. Resolution order:
 
-        1. $env:COPILOT_HA_BRIDGE_CONFIG            (explicit override)
-        2. ~/.copilot/copilot-ha-bridge.config.json (what install.ps1 writes)
+        1. $env:AGENT_HA_BRIDGE_CONFIG              (explicit override)
+        2. ~/.agent-ha-bridge/config.json           (what install.ps1 writes)
+        3. $env:COPILOT_HA_BRIDGE_CONFIG            (pre-rename override)
+        4. ~/.copilot/copilot-ha-bridge.config.json (pre-rename location)
+
+    The last two keep a not-yet-migrated install working; install.ps1 moves the file
+    to its new home on upgrade.
 
     Everything in the file is optional; anything absent falls back to the defaults
     below. See config.example.json in the repository root.
@@ -14,6 +20,10 @@
 
 function Get-BridgeUserConfig {
     $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($env:AGENT_HA_BRIDGE_CONFIG)) {
+        $candidates += $env:AGENT_HA_BRIDGE_CONFIG
+    }
+    $candidates += (Join-Path $HOME '.agent-ha-bridge\config.json')
     if (-not [string]::IsNullOrWhiteSpace($env:COPILOT_HA_BRIDGE_CONFIG)) {
         $candidates += $env:COPILOT_HA_BRIDGE_CONFIG
     }
@@ -26,7 +36,7 @@ function Get-BridgeUserConfig {
             if (-not [string]::IsNullOrWhiteSpace($raw)) { return ($raw | ConvertFrom-Json) }
         }
         catch {
-            throw "Copilot HA bridge config at '$path' is not valid JSON: $($_.Exception.Message)"
+            throw "Agent HA bridge config at '$path' is not valid JSON: $($_.Exception.Message)"
         }
     }
     $null
@@ -61,10 +71,10 @@ $script:DecisionBridgeConfig = @{
     # --- machine specific, overridable from the config file -------------------
     HomeAssistantBaseUrl = (Get-BridgeSetting 'homeAssistant.baseUrl' 'http://homeassistant.local:8123')
     HomeAssistantToken = (Get-BridgeSetting 'homeAssistant.token' '')
-    HomeAssistantTokenEnvVar = (Get-BridgeSetting 'homeAssistant.tokenEnvVar' 'COPILOT_HA_TOKEN')
+    HomeAssistantTokenEnvVar = (Get-BridgeSetting 'homeAssistant.tokenEnvVar' 'AGENT_HA_TOKEN')
     SessionStateRoot = (Get-BridgeSetting 'copilot.sessionStateRoot' (Join-Path $HOME '.copilot\session-state'))
-    DashboardUrlPath = (Get-BridgeSetting 'dashboard.urlPath' 'copilot-decisions')
-    DashboardPath = ('/' + (Get-BridgeSetting 'dashboard.urlPath' 'copilot-decisions') + '/decision')
+    DashboardUrlPath = (Get-BridgeSetting 'dashboard.urlPath' 'agent-decisions')
+    DashboardPath = ('/' + (Get-BridgeSetting 'dashboard.urlPath' 'agent-decisions') + '/decision')
     # Notifications are optional. `service` is any HA notify-style service, e.g.
     # notify.notify, notify.mobile_app_pixel, or ticker.notify.
     NotifyEnabled = [bool](Get-BridgeSetting 'notifications.enabled' $false)
@@ -76,7 +86,7 @@ $script:DecisionBridgeConfig = @{
     DecisionChoiceMaxChars = 600
     ResponsePlaceholder = 'Select an answer...'
     CancelOption = 'Cancel request'
-    LogFile = (Join-Path $env:TEMP 'copilot-decision-bridge.log')
+    LogFile = (Join-Path $env:TEMP 'agent-decision-bridge.log')
     HttpRetryCount = 4
     HttpRetryInitialDelayMs = 400
     # How long the ask_user wait tolerates an unreachable Home Assistant before it
@@ -993,8 +1003,9 @@ function Get-HomeAssistantHeaders {
         Resolves the Home Assistant long-lived access token.
 
         Order: the config file's homeAssistant.token, then the environment variable it
-        names in homeAssistant.tokenEnvVar (default COPILOT_HA_TOKEN). The token is
-        never stored in the repository - config.json is gitignored.
+        names in homeAssistant.tokenEnvVar (default AGENT_HA_TOKEN), then the
+        pre-rename COPILOT_HA_TOKEN so an existing environment keeps working. The token
+        is never stored in the repository - config.json is gitignored.
     #>
     $token = [string]$script:DecisionBridgeConfig.HomeAssistantToken
     if ([string]::IsNullOrWhiteSpace($token)) {
@@ -1002,6 +1013,9 @@ function Get-HomeAssistantHeaders {
         if (-not [string]::IsNullOrWhiteSpace($envVar)) {
             $token = [string][Environment]::GetEnvironmentVariable($envVar)
         }
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $token = [string][Environment]::GetEnvironmentVariable('COPILOT_HA_TOKEN')
     }
     if ([string]::IsNullOrWhiteSpace($token)) {
         throw ("No Home Assistant token. Set homeAssistant.token in the bridge config " +
@@ -1173,14 +1187,14 @@ function Get-CopilotDecisionMarkerPath {
     $key = Get-CopilotSafeSessionKey -SessionId $SessionId
     $sessionDirectory = Join-Path $script:DecisionBridgeConfig.SessionStateRoot $key
     if (Test-Path -LiteralPath $sessionDirectory) {
-        return Join-Path $sessionDirectory 'copilot-pending-decision.json'
+        return Join-Path $sessionDirectory 'agent-pending-decision.json'
     }
 
     $fallback = Join-Path (Join-Path $env:TEMP 'copilot-bridge-markers') $key
     if (-not (Test-Path -LiteralPath $fallback)) {
         New-Item -ItemType Directory -Path $fallback -Force | Out-Null
     }
-    Join-Path $fallback 'copilot-pending-decision.json'
+    Join-Path $fallback 'agent-pending-decision.json'
 }
 
 function Write-CopilotDecisionMarker {

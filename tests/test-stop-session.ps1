@@ -21,8 +21,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
-. (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')
+$env:AGENT_BRIDGE_DAEMON_NORUN = '1'
+. (Join-Path $PSScriptRoot '..\hooks\agent-bridge-daemon.ps1')
 
 $script:DaemonConfig.LogFile = Join-Path ([IO.Path]::GetTempPath()) "test-stop-session-$([guid]::NewGuid().ToString('N').Substring(0,8)).log"
 $testLogFile = $script:DaemonConfig.LogFile

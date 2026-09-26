@@ -41,17 +41,17 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'session-launch.ps1')
 
 $script:DaemonConfig = @{
-    MutexName = 'Local\CopilotBridgeDaemon'
+    MutexName = 'Local\AgentBridgeDaemon'
     VerboseToggle = 'input_boolean.agent_bridge_detailed_activity'
-    LogFile = (Join-Path $env:TEMP 'copilot-bridge-daemon.log')
-    StateFile = (Join-Path $env:TEMP 'copilot-bridge-daemon-state.json')
+    LogFile = (Join-Path $env:TEMP 'agent-bridge-daemon.log')
+    StateFile = (Join-Path $env:TEMP 'agent-bridge-daemon-state.json')
     # Written by the self-updater when an install finishes, read by whichever daemon
     # is running next, so a press of the install button ends in a visible
     # "updated to X" (or a failure) notification.
-    UpdateOutcomeFile = (Join-Path $env:TEMP 'copilot-bridge-update-outcome.json')
+    UpdateOutcomeFile = (Join-Path $env:TEMP 'agent-bridge-update-outcome.json')
     # Written once the pre-rename entities have been swept, so the sweep does not
     # repeat on every daemon start.
-    LegacyCleanupMarker = (Join-Path $env:TEMP 'copilot-bridge-legacy-cleanup.json')
+    LegacyCleanupMarker = (Join-Path $env:TEMP 'agent-bridge-legacy-cleanup.json')
     # Cap how much transcript is read in one pass, so a session that produced a huge
     # burst cannot stall the loop.
     MaxTailBytes = 512000
@@ -256,7 +256,7 @@ if (Test-Path -LiteralPath (Join-Path $claudeHooks 'claude-session.ps1')) {
 }
 
 $script:CodexAdapterLoaded = $false
-$codexHooks = Join-Path $HOME '.copilot\codex-bridge\plugins\copilot-ha-bridge\hooks'
+$codexHooks = Join-Path $HOME '.agent-ha-bridge\codex-bridge\plugins\agent-ha-bridge\hooks'
 if (Test-Path -LiteralPath (Join-Path $codexHooks 'codex-session.ps1')) {
     try {
         . (Join-Path $codexHooks 'codex-session.ps1')
@@ -1457,7 +1457,7 @@ function Invoke-DaemonUpdateOutcome {
             $message = "The Home Assistant bridge updated to **$version**."
             if ($url) { $message += " [Release notes]($url)" }
             Invoke-HomeAssistantService -Domain 'persistent_notification' -Service 'create' `
-                -Data @{ title = 'Bridge updated'; message = $message; notification_id = 'copilot_bridge_update' } `
+                -Data @{ title = 'Bridge updated'; message = $message; notification_id = 'agent_bridge_update' } `
                 -Headers $Headers
             Write-DaemonLog -Message "self-update announced: updated to $version"
         }
@@ -1469,7 +1469,7 @@ function Invoke-DaemonUpdateOutcome {
             $latest = if ($version) { $version } else { $installed }
             Publish-CopilotMqttUpdate -InstalledVersion $installed -LatestVersion $latest -Headers $Headers
             Invoke-HomeAssistantService -Domain 'persistent_notification' -Service 'create' `
-                -Data @{ title = 'Bridge update failed'; message = "The bridge update did not complete: $err"; notification_id = 'copilot_bridge_update' } `
+                -Data @{ title = 'Bridge update failed'; message = "The bridge update did not complete: $err"; notification_id = 'agent_bridge_update' } `
                 -Headers $Headers
             Write-DaemonLog -Message "self-update announced: FAILED ($err)"
         }
@@ -2928,10 +2928,10 @@ function Start-BridgeDaemon {
 }
 
 # A second daemon would publish duplicate activity and race on reply delivery.
-# Tests dot-source this file with COPILOT_BRIDGE_DAEMON_NORUN set to load the
+# Tests dot-source this file with AGENT_BRIDGE_DAEMON_NORUN set to load the
 # functions without starting the daemon; the supervisor never sets it, so a real
 # launch is unaffected.
-if (-not $env:COPILOT_BRIDGE_DAEMON_NORUN) {
+if (-not $env:AGENT_BRIDGE_DAEMON_NORUN) {
     $mutex = [Threading.Mutex]::new($false, $script:DaemonConfig.MutexName)
     $owned = $false
     try {

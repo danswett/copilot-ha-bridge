@@ -96,7 +96,7 @@ came from a live session.
 - **Session to pid.** Claude has no `inuse.<pid>.lock`. A hook runs as a descendant of
   its session, so the owning process is found by walking the hook's parent chain to the
   `claude` process — correct even with several sessions open. The result is recorded
-  under `%TEMP%\copilot-bridge-claude` and is how the daemon knows where to inject.
+  under `%TEMP%\agent-bridge-claude` and is how the daemon knows where to inject.
 - **Liveness.** A session is live while its recorded pid is still a running `claude`
   process, which is what retires its entities promptly on exit.
 - **Idle.** Claude writes no turn-end transcript entry, so the `Stop` hook is the

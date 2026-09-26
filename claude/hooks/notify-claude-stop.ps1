@@ -25,7 +25,7 @@ try {
     . (Join-Path $PSScriptRoot 'claude-session.ps1')
     . (Join-Path $PSScriptRoot 'claude-transcript.ps1')
 
-    $core = Join-Path $HOME '.copilot\hooks'
+    $core = Join-Path $HOME '.agent-ha-bridge\hooks'
     . (Join-Path $core 'decision-bridge-common.ps1')
     . (Join-Path $core 'decision-mqtt.ps1')
     . (Join-Path $core 'bridge-adapter.ps1')

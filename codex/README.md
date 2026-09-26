@@ -47,7 +47,7 @@ check:
 
 ```powershell
 # Trusted hooks appear here, one per event.
-Select-String -Path $env:USERPROFILE\.codex\config.toml -Pattern 'hooks.state."copilot-ha-bridge'
+Select-String -Path $env:USERPROFILE\.codex\config.toml -Pattern 'hooks.state."agent-ha-bridge'
 ```
 
 Re-running the installer preserves trust, because the hash covers the hook command

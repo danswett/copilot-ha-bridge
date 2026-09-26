@@ -26,8 +26,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
-. (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')
+$env:AGENT_BRIDGE_DAEMON_NORUN = '1'
+. (Join-Path $PSScriptRoot '..\hooks\agent-bridge-daemon.ps1')
 
 # Send this run's log lines to a throwaway file. Dot-sourcing the daemon brings its
 # real log path with it, so without this a test run writes entries like

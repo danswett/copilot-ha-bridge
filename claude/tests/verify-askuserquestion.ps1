@@ -121,7 +121,7 @@ exit 0
     $session = Start-Process -FilePath $exe -WorkingDirectory $scratch -PassThru -WindowStyle Minimized
     try {
         Start-Sleep -Seconds 14
-        . (Join-Path $HOME '.copilot\hooks\decision-inject.ps1')
+        . (Join-Path $HOME '.agent-ha-bridge\hooks\decision-inject.ps1')
         Initialize-CopilotConsoleInjector
         [void][CopilotCli.ConsoleInjector]::Send(
             [uint32]$session.Id,

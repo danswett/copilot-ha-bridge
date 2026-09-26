@@ -1,5 +1,5 @@
 {
-  "name": "copilot-ha-bridge-mcp",
+  "name": "agent-ha-bridge-mcp",
   "version": "0.1.0",
   "private": true,
   "type": "module",

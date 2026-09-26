@@ -147,7 +147,7 @@ Test-That 'a degenerate id still yields a valid node id' {
 Write-Host '--- token handling ---'
 $token = Get-BridgeSetting 'homeAssistant.token' ''
 if ([string]::IsNullOrWhiteSpace($token)) {
-    $tokenEnvVar = Get-BridgeSetting 'homeAssistant.tokenEnvVar' 'COPILOT_HA_TOKEN'
+    $tokenEnvVar = Get-BridgeSetting 'homeAssistant.tokenEnvVar' 'AGENT_HA_TOKEN'
     if ($tokenEnvVar) { $token = [Environment]::GetEnvironmentVariable($tokenEnvVar) }
 }
 if ([string]::IsNullOrWhiteSpace($token)) {
@@ -156,7 +156,7 @@ if ([string]::IsNullOrWhiteSpace($token)) {
     Write-Host '  SKIP  no Home Assistant token configured; log-leakage scan not applicable'
 }
 else {
-    foreach ($log in @('copilot-decision-bridge.log', 'copilot-bridge-daemon.log', 'copilot-bridge-supervisor.log')) {
+    foreach ($log in @('agent-decision-bridge.log', 'agent-bridge-daemon.log', 'agent-bridge-supervisor.log')) {
         $path = Join-Path $env:TEMP $log
         Test-That "the token is absent from $log" {
             -not (Test-Path -LiteralPath $path) -or

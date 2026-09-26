@@ -41,7 +41,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$hooksDir = Join-Path $HOME '.copilot\hooks'
+$hooksDir = Join-Path $HOME '.agent-ha-bridge\hooks'
 if (-not (Test-Path -LiteralPath (Join-Path $hooksDir 'bridge-update.ps1'))) {
     # Fall back to the copy in this clone, so -Check works before a first install.
     $hooksDir = Join-Path $PSScriptRoot 'hooks'
@@ -97,5 +97,5 @@ Write-Host '==> Installing' -ForegroundColor Cyan
 $result = Invoke-BridgeSelfUpdate
 Write-Host "    $($result.Detail)"
 Write-Host ''
-Write-Host "Log: $env:TEMP\copilot-bridge-update.log"
+Write-Host "Log: $env:TEMP\agent-bridge-update.log"
 Write-Host 'Restart any running Copilot or Claude sessions to pick up the new hooks.' -ForegroundColor Yellow

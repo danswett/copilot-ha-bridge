@@ -17,16 +17,16 @@
 .PARAMETER Token
     A Home Assistant long-lived access token. Stored in the bridge config outside the
     repository. Omit it to keep an existing token, or to supply one via the
-    COPILOT_HA_TOKEN environment variable instead.
+    AGENT_HA_TOKEN environment variable instead.
 
 .PARAMETER NotifyService
     Optional Home Assistant notify-style service for out-of-band alerts, e.g.
     notify.mobile_app_pixel. Omit to disable notifications.
 
 .PARAMETER TargetHome
-    Install into this directory's .copilot instead of $HOME's. Intended for testing a
-    build without touching a working install; $HOME is read-only in PowerShell, so it
-    cannot be redirected any other way.
+    Install into this directory's .agent-ha-bridge instead of $HOME's. Intended for
+    testing a build without touching a working install; $HOME is read-only in
+    PowerShell, so it cannot be redirected any other way.
 
 .PARAMETER Clients
     Which clients to configure: any of copilot, claude, codex (comma-separated).
@@ -70,16 +70,28 @@ $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
 # recorded config and the update check can never disagree about what is installed.
 $versionFile = Join-Path $repoRoot 'VERSION'
 $version = if (Test-Path -LiteralPath $versionFile) { (Get-Content -LiteralPath $versionFile -Raw).Trim() } else { '0.0.0' }
+# ~/.copilot belongs to the Copilot CLI: the bridge only ever writes its hook
+# definition there, and reads the transcripts under session-state. Everything the
+# bridge owns lives in its own root, so a Claude-, Codex- or MCP-only install never
+# creates a Copilot directory.
 $copilotHome = Join-Path $installHome '.copilot'
-$hooksDir = Join-Path $copilotHome 'hooks'
-$legacySkillDir = Join-Path $copilotHome 'skills\decision-notifier'
-$configPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
-$hookConfigPath = Join-Path $hooksDir 'decision-notifier.json'
-$taskName = 'CopilotBridgeDaemon'
+$bridgeHome = Join-Path $installHome '.agent-ha-bridge'
+$hooksDir = Join-Path $bridgeHome 'hooks'
+$configPath = Join-Path $bridgeHome 'config.json'
+$hookConfigPath = Join-Path $copilotHome 'hooks\decision-notifier.json'
+$taskName = 'AgentBridgeDaemon'
 # A sandbox install must not collide with the real Add/Remove Programs entry.
-$arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBridge' +
+$arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentHaBridge' +
           $(if ($TargetHome) { '_Sandbox' } else { '' })
-$bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
+
+# Pre-rename locations, still cleaned up on upgrade.
+$legacySkillDir = Join-Path $copilotHome 'skills\decision-notifier'
+$legacyHooksDir = Join-Path $copilotHome 'hooks'
+$legacyConfigPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
+$legacyBridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
+$legacyTaskName = 'CopilotBridgeDaemon'
+$legacyArpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBridge' +
+                $(if ($TargetHome) { '_Sandbox' } else { '' })
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -270,6 +282,144 @@ function Protect-BridgeSecretFile {
     }
 }
 
+# ------------------------------------------------------------------ migration
+# Installs from before the rename kept everything in ~/.copilot. Move what the bridge
+# owns into its own root, leaving the Copilot CLI's own files alone.
+
+# Everything the bridge ever shipped into ~/.copilot/hooks, current and historical.
+# Anything not on this list belongs to the Copilot CLI or another tool and is left.
+$script:LegacyHookFiles = @(
+    'decision-bridge-common.ps1', 'decision-mqtt.ps1', 'decision-ha-websocket.ps1',
+    'decision-inject.ps1', 'bridge-adapter.ps1', 'bridge-update.ps1',
+    'session-launch.ps1', 'notify-agent-response.ps1', 'notify-home-assistant.ps1',
+    'route-ask-user-v3.ps1', 'VERSION',
+    'copilot-bridge-daemon.ps1', 'copilot-bridge-supervisor.ps1', 'copilot-bridge-launch.vbs',
+    'agent-bridge-daemon.ps1', 'agent-bridge-supervisor.ps1', 'agent-bridge-launch.vbs',
+    # Retired in earlier releases; deleted rather than carried forward.
+    'route-ask-user-v2.ps1', 'route-ask-user-home-assistant.ps1', 'sync-active-sessions.ps1',
+    'test-decision-args.ps1', 'test-decision-retry.ps1'
+)
+
+function Invoke-BridgeLayoutMigration {
+    <#
+        Moves a pre-rename install into ~/.agent-ha-bridge and returns whether it had
+        anything to do. Safe to run repeatedly: every step is guarded on the legacy
+        artefact still being there.
+
+        Every path is a parameter rather than a script variable so a test can point the
+        whole migration at a scratch directory. -SkipMachineWide leaves the scheduled
+        task and running processes alone, for a sandbox install that must not disturb
+        the real one.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$CopilotHome,
+        [Parameter(Mandatory)][string]$BridgeHome,
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$LegacyHooksDir,
+        [Parameter(Mandatory)][string]$LegacyConfigPath,
+        [Parameter(Mandatory)][string]$LegacyBridgeHome,
+        [string]$LegacyArpKey,
+        [string]$LegacyTaskName,
+        [switch]$SkipMachineWide
+    )
+
+    $migrated = $false
+    function Write-Once {
+        if (-not $script:MigrationAnnounced) {
+            Write-Step 'Migrating the pre-rename install'
+            $script:MigrationAnnounced = $true
+        }
+    }
+    $script:MigrationAnnounced = $false
+
+    if (-not $SkipMachineWide -and $LegacyTaskName) {
+        # The old daemon holds the old script paths in memory, so it has to go first:
+        # otherwise it keeps rewriting the state files the new one is about to adopt.
+        if (Get-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue) {
+            Write-Once; $migrated = $true
+            Stop-ScheduledTask -TaskName $LegacyTaskName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $LegacyTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Host "    removed the '$LegacyTaskName' scheduled task"
+        }
+        foreach ($proc in Get-Process pwsh -ErrorAction SilentlyContinue) {
+            try {
+                $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)" -ErrorAction Stop).CommandLine
+                if ($cmd -match 'copilot-bridge-(daemon|supervisor)\.ps1') {
+                    Write-Once; $migrated = $true
+                    Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+                    Write-Host "    stopped the old daemon (pid $($proc.Id))"
+                }
+            }
+            catch { }
+        }
+    }
+
+    if (-not (Test-Path -LiteralPath $BridgeHome)) {
+        New-Item -ItemType Directory -Path $BridgeHome -Force | Out-Null
+    }
+
+    # The config carries the Home Assistant token, so moving it rather than rewriting
+    # it from scratch is what keeps an upgrade from prompting all over again.
+    if ((Test-Path -LiteralPath $LegacyConfigPath) -and -not (Test-Path -LiteralPath $ConfigPath)) {
+        Write-Once; $migrated = $true
+        Move-Item -LiteralPath $LegacyConfigPath -Destination $ConfigPath -Force
+        Write-Host "    config -> $ConfigPath"
+    }
+    if ((Test-Path -LiteralPath "$LegacyConfigPath.bak") -and -not (Test-Path -LiteralPath "$ConfigPath.bak")) {
+        Move-Item -LiteralPath "$LegacyConfigPath.bak" -Destination "$ConfigPath.bak" -Force
+    }
+
+    # ~/.copilot/mcp and ~/.copilot/codex-bridge are wholly the bridge's.
+    foreach ($name in @('mcp', 'codex-bridge')) {
+        $from = Join-Path $CopilotHome $name
+        $to = Join-Path $BridgeHome $name
+        if ((Test-Path -LiteralPath $from) -and -not (Test-Path -LiteralPath $to)) {
+            Write-Once; $migrated = $true
+            Move-Item -LiteralPath $from -Destination $to -Force
+            Write-Host "    $name -> $to"
+        }
+    }
+
+    if (Test-Path -LiteralPath $LegacyHooksDir) {
+        $removed = 0
+        foreach ($name in $script:LegacyHookFiles) {
+            $path = Join-Path $LegacyHooksDir $name
+            if (Test-Path -LiteralPath $path) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                $removed++
+            }
+        }
+        $legacyDashboard = Join-Path $LegacyHooksDir 'dashboard'
+        if (Test-Path -LiteralPath $legacyDashboard) {
+            Remove-Item -LiteralPath $legacyDashboard -Recurse -Force -ErrorAction SilentlyContinue
+            $removed++
+        }
+        if ($removed -gt 0) {
+            Write-Once; $migrated = $true
+            Write-Host "    removed $removed stale file(s) from $LegacyHooksDir"
+        }
+        # Only when the Copilot CLI has left nothing of its own behind - its hook
+        # definition normally still lives here.
+        if (-not (Get-ChildItem -LiteralPath $LegacyHooksDir -Force -ErrorAction SilentlyContinue)) {
+            Remove-Item -LiteralPath $LegacyHooksDir -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    if (Test-Path -LiteralPath $LegacyBridgeHome) {
+        Write-Once; $migrated = $true
+        Remove-Item -LiteralPath $LegacyBridgeHome -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "    removed $LegacyBridgeHome"
+    }
+    if ($LegacyArpKey -and (Test-Path -LiteralPath $LegacyArpKey)) {
+        Write-Once; $migrated = $true
+        Remove-Item -LiteralPath $LegacyArpKey -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host '    removed the old Apps & features entry'
+    }
+
+    if ($migrated) { Write-Host '    the dashboard moves to /agent-decisions once the daemon restarts' }
+    $migrated
+}
+
 # Tests dot-source this script with BRIDGE_INSTALL_NORUN set to load its helper
 # functions without running the install; a real run never sets it.
 if ($env:BRIDGE_INSTALL_NORUN) { return }
@@ -280,13 +430,15 @@ if (-not $IsWindows -and $PSVersionTable.PSVersion.Major -ge 6) {
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     throw "PowerShell 7+ is required (found $($PSVersionTable.PSVersion))."
 }
-if (-not (Test-Path -LiteralPath $copilotHome)) {
-    # ~/.copilot is the bridge's home for its shared scripts, config and daemon,
-    # whichever clients are configured - so create it rather than requiring the
-    # Copilot CLI to have run first. If Copilot itself is one of the chosen clients
-    # and is not actually installed, that is warned about later.
-    New-Item -ItemType Directory -Path $copilotHome -Force | Out-Null
+if (-not (Test-Path -LiteralPath $bridgeHome)) {
+    New-Item -ItemType Directory -Path $bridgeHome -Force | Out-Null
 }
+
+$script:DidMigrate = Invoke-BridgeLayoutMigration `
+    -CopilotHome $copilotHome -BridgeHome $bridgeHome -ConfigPath $configPath `
+    -LegacyHooksDir $legacyHooksDir -LegacyConfigPath $legacyConfigPath `
+    -LegacyBridgeHome $legacyBridgeHome -LegacyArpKey $legacyArpKey `
+    -LegacyTaskName $legacyTaskName -SkipMachineWide:([bool]$TargetHome)
 
 # ---------------------------------------------------------------- hook scripts
 Write-Step "Copying hook scripts to $hooksDir"
@@ -379,7 +531,7 @@ Write-Step "Configuring: $(($selectedClients | ForEach-Object { $script:ClientLa
 # release without guessing.
 if (-not $config.PSObject.Properties.Name.Contains('updates')) {
     $config | Add-Member -NotePropertyName 'updates' -NotePropertyValue ([pscustomobject]@{
-        repository = 'danswett/copilot-ha-bridge'; installedVersion = ''; checkForUpdates = $true
+        repository = 'danswett/agent-ha-bridge'; installedVersion = ''; checkForUpdates = $true
     })
 }
 $config.updates.installedVersion = $version
@@ -469,6 +621,13 @@ if ($selectedClients -contains 'copilot') {
     }
 
     Write-Step 'Merging Copilot hook definitions'
+    # The hook definition is the one bridge file that has to stay under ~/.copilot,
+    # because that is where the Copilot CLI looks for it. It points at the scripts in
+    # the bridge's own root.
+    $copilotHooksDir = Split-Path -Parent $hookConfigPath
+    if (-not (Test-Path -LiteralPath $copilotHooksDir)) {
+        New-Item -ItemType Directory -Path $copilotHooksDir -Force | Out-Null
+    }
     $hookDefs = [ordered]@{
         agentStop = @(
             [ordered]@{
@@ -498,6 +657,13 @@ if ($selectedClients -contains 'copilot') {
         Set-Content -LiteralPath $hookConfigPath -Encoding UTF8
     Write-Host "    $hookConfigPath"
 }
+elseif (Test-Path -LiteralPath $hookConfigPath) {
+    # Copilot is not configured, so a definition left over from an earlier run would
+    # point the CLI at scripts this install has just moved out from under it.
+    Write-Step 'Removing the stale Copilot hook definition'
+    Remove-Item -LiteralPath $hookConfigPath -Force -ErrorAction SilentlyContinue
+    Write-Host "    $hookConfigPath"
+}
 
 # ------------------------------------------------------------- scheduled task
 if (-not $SkipTask) {
@@ -505,7 +671,7 @@ if (-not $SkipTask) {
     # wscript + the VBS launcher, not pwsh directly: WScript.Shell.Run(..., 0, False)
     # starts the supervisor with no window at all, while still giving the daemon a real
     # console. conhost --headless would give a pseudoconsole and break reply injection.
-    $launcher = Join-Path $hooksDir 'copilot-bridge-launch.vbs'
+    $launcher = Join-Path $hooksDir 'agent-bridge-launch.vbs'
     $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument "`"$launcher`""
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
@@ -522,7 +688,7 @@ if (-not $SkipTask) {
     else {
         Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
             -Settings $settings -Principal $principal `
-            -Description 'Supervises the Copilot CLI Home Assistant bridge daemon.' | Out-Null
+            -Description 'Supervises the AI coding agent Home Assistant bridge daemon.' | Out-Null
     }
     Start-ScheduledTask -TaskName $taskName
     Write-Host "    registered and started"
@@ -567,18 +733,18 @@ if ($TargetHome) { $uninstallArgs += " -TargetHome `"$installHome`"" }
 
 New-Item -Path $arpKey -Force | Out-Null
 $arpValues = @{
-    DisplayName     = 'Copilot CLI Home Assistant bridge'
+    DisplayName     = 'AI coding agent Home Assistant bridge'
     DisplayVersion  = $version
-    Publisher       = 'copilot-ha-bridge'
+    Publisher       = 'agent-ha-bridge'
     InstallLocation = $bridgeHome
-    URLInfoAbout    = 'https://github.com/danswett/copilot-ha-bridge'
+    URLInfoAbout    = 'https://github.com/danswett/agent-ha-bridge'
     UninstallString = "pwsh.exe $uninstallArgs"
     QuietUninstallString = "pwsh.exe $uninstallArgs"
 }
 foreach ($name in $arpValues.Keys) { Set-ItemProperty -Path $arpKey -Name $name -Value $arpValues[$name] }
 Set-ItemProperty -Path $arpKey -Name NoModify -Value 1 -Type DWord
 Set-ItemProperty -Path $arpKey -Name NoRepair -Value 1 -Type DWord
-Write-Host "    'Copilot CLI Home Assistant bridge' is now uninstallable from Settings"
+Write-Host "    'AI coding agent Home Assistant bridge' is now uninstallable from Settings"
 
 Write-Step 'Done'
 Write-Host 'Next steps:' -ForegroundColor Yellow
@@ -596,12 +762,12 @@ if ($selectedClients -contains 'codex') {
     $stepNo++
 }
 if ($selectedClients -contains 'mcp') {
-    Write-Host "  $stepNo. MCP: a paste-ready client config is at ~/.copilot/mcp/mcp-client-config.json"
+    Write-Host "  $stepNo. MCP: a paste-ready client config is at ~/.agent-ha-bridge/mcp/mcp-client-config.json"
     Write-Host '        (Claude Desktop was configured automatically if present). See mcp/README.md for ChatGPT/HTTP.'
     $stepNo++
 }
 Write-Host "  $stepNo. Open the Agent Sessions dashboard in Home Assistant."
-Write-Host "     Logs: `$env:TEMP\copilot-bridge-daemon.log and copilot-decision-bridge.log"
+Write-Host "     Logs: `$env:TEMP\agent-bridge-daemon.log and agent-decision-bridge.log"
 if ($selectedClients -notcontains 'mcp') {
     Write-Host ''
     Write-Host 'Want an MCP client too (Claude Desktop, Cursor, ChatGPT)? Re-run with -Clients mcp,' -ForegroundColor DarkGray

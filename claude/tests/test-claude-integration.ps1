@@ -13,7 +13,7 @@
     feeds them - on stdin.
 
     Requires the main bridge to be installed (the shared Home Assistant layer lives in
-    ~/.copilot/hooks). Creates entities and removes them again.
+    ~/.agent-ha-bridge/hooks). Creates entities and removes them again.
 #>
 
 [CmdletBinding()]
@@ -22,7 +22,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$core = Join-Path $HOME '.copilot\hooks'
+$core = Join-Path $HOME '.agent-ha-bridge\hooks'
 if (-not (Test-Path -LiteralPath (Join-Path $core 'decision-mqtt.ps1'))) {
     Write-Host 'The main bridge is not installed; run install.ps1 first.' -ForegroundColor Yellow
     exit 2

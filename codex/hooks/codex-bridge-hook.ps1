@@ -29,7 +29,7 @@ try {
 
     . (Join-Path $PSScriptRoot 'codex-session.ps1')
 
-    $core = Join-Path $HOME '.copilot\hooks'
+    $core = Join-Path $HOME '.agent-ha-bridge\hooks'
     . (Join-Path $core 'decision-bridge-common.ps1')
     . (Join-Path $core 'decision-mqtt.ps1')
     . (Join-Path $core 'decision-ha-websocket.ps1')

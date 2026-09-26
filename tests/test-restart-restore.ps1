@@ -19,8 +19,8 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
-. (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')
+$env:AGENT_BRIDGE_DAEMON_NORUN = '1'
+. (Join-Path $PSScriptRoot '..\hooks\agent-bridge-daemon.ps1')
 
 # Keep this run's log lines out of the live daemon log; dot-sourcing the daemon
 # otherwise points Write-DaemonLog straight at it.
@@ -157,10 +157,10 @@ $detachDir = Join-Path ([System.IO.Path]::GetTempPath()) ("bridge-detach-test-" 
 New-Item -ItemType Directory -Path $detachDir -Force | Out-Null
 $detachScript = Join-Path $detachDir 'detach.ps1'
 $detachResult = Join-Path $detachDir 'result.txt'
-$daemonPath = (Resolve-Path (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')).Path
+$daemonPath = (Resolve-Path (Join-Path $PSScriptRoot '..\hooks\agent-bridge-daemon.ps1')).Path
 
 @"
-`$env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
+`$env:AGENT_BRIDGE_DAEMON_NORUN = '1'
 . '$daemonPath'
 
 Add-Type -Namespace Detach -Name Con -MemberDefinition @'

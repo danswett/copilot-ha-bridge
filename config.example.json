@@ -2,10 +2,10 @@
   "homeAssistant": {
     "baseUrl": "http://homeassistant.local:8123",
     "token": "",
-    "tokenEnvVar": "COPILOT_HA_TOKEN"
+    "tokenEnvVar": "AGENT_HA_TOKEN"
   },
   "dashboard": {
-    "urlPath": "copilot-decisions"
+    "urlPath": "agent-decisions"
   },
   "notifications": {
     "enabled": false,
@@ -23,7 +23,7 @@
     "defaultWorkspace": "Bridge",
     "resumeCount": 12,
     "workspaces": [
-      { "label": "Bridge", "path": "~/repos/copilot-ha-bridge" },
+      { "label": "Bridge", "path": "~/repos/agent-ha-bridge" },
       "~/repos"
     ],
     "model": "",
@@ -34,7 +34,7 @@
   },
   "clients": ["copilot"],
   "updates": {
-    "repository": "danswett/copilot-ha-bridge",
+    "repository": "danswett/agent-ha-bridge",
     "installedVersion": "",
     "checkForUpdates": true,
     "checkHours": 6

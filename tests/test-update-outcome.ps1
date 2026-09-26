@@ -17,15 +17,15 @@
       * Invoke-DaemonUpdateOutcome announces success, announces failure, ignores a
         stale or malformed marker, and always consumes the marker.
 
-    The daemon file is dot-sourced with COPILOT_BRIDGE_DAEMON_NORUN set so its
+    The daemon file is dot-sourced with AGENT_BRIDGE_DAEMON_NORUN set so its
     functions load without the daemon starting.
 #>
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$env:COPILOT_BRIDGE_DAEMON_NORUN = '1'
-. (Join-Path $PSScriptRoot '..\hooks\copilot-bridge-daemon.ps1')
+$env:AGENT_BRIDGE_DAEMON_NORUN = '1'
+. (Join-Path $PSScriptRoot '..\hooks\agent-bridge-daemon.ps1')
 
 # Isolate the marker from the real daemon's file so a test run can never make the
 # live bridge announce a phantom update.
@@ -102,7 +102,7 @@ Test-That 'it publishes up to date with the spinner off' {
 Test-That 'it fires one notification naming the version' {
     $script:Notified.Count -eq 1 -and $script:Notified[0].Title -eq 'Bridge updated' -and $script:Notified[0].Message -match '1\.2\.0'
 }
-Test-That 'the notification is a stable single id' { $script:Notified[0].Id -eq 'copilot_bridge_update' }
+Test-That 'the notification is a stable single id' { $script:Notified[0].Id -eq 'agent_bridge_update' }
 Test-That 'the marker is consumed' { -not (Test-Path -LiteralPath $outcomeFile) }
 
 Write-Host '--- a failure marker clears the spinner and reports the error ---'

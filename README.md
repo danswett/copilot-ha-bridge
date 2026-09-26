@@ -1,7 +1,7 @@
 # AI coding agent ⇄ Home Assistant bridge
 
-[![CI](https://github.com/danswett/copilot-ha-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/danswett/copilot-ha-bridge/actions/workflows/ci.yml)
-[![CodeQL](https://github.com/danswett/copilot-ha-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/danswett/copilot-ha-bridge/actions/workflows/codeql.yml)
+[![CI](https://github.com/danswett/agent-ha-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/danswett/agent-ha-bridge/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/danswett/agent-ha-bridge/actions/workflows/codeql.yml/badge.svg)](https://github.com/danswett/agent-ha-bridge/actions/workflows/codeql.yml)
 
 Answer your AI coding agent from Home Assistant — or from your terminal — whichever you
 happen to be looking at. Works with **GitHub Copilot CLI**, **Claude Code**, **OpenAI
@@ -108,14 +108,14 @@ only a Home Assistant token.
 The one-liner:
 
 ```powershell
-irm https://raw.githubusercontent.com/danswett/copilot-ha-bridge/main/bootstrap.ps1 | iex
+irm https://raw.githubusercontent.com/danswett/agent-ha-bridge/main/bootstrap.ps1 | iex
 ```
 
 Or from a clone:
 
 ```powershell
-git clone https://github.com/danswett/copilot-ha-bridge.git
-cd copilot-ha-bridge
+git clone https://github.com/danswett/agent-ha-bridge.git
+cd agent-ha-bridge
 .\install.ps1
 ```
 
@@ -136,7 +136,7 @@ adapters get set up. Pick them non-interactively with `-Clients`:
 
 Your selection is remembered, so a re-run or a self-update reconfigures the same set.
 Choosing **mcp** installs the Node server, writes a paste-ready client config to
-`~/.copilot/mcp/mcp-client-config.json`, and registers Claude Desktop automatically if
+`~/.agent-ha-bridge/mcp/mcp-client-config.json`, and registers Claude Desktop automatically if
 it's present; other MCP clients (Cursor, ChatGPT) use the snippet — see
 [`mcp/README.md`](mcp/README.md).
 
@@ -160,7 +160,7 @@ Optional out-of-band push when a session needs you:
 
 The installer is idempotent — re-run it to upgrade in place. Re-running with only
 some arguments keeps the rest of your settings, and the previous config is backed up
-to `copilot-ha-bridge.config.json.bak` first.
+to `agent-ha-bridge.config.json.bak` first.
 
 It is **not interactive** when you pass `-NonInteractive`, which is what you want in a
 script; otherwise it prompts for anything missing. Before finishing it verifies the URL
@@ -178,17 +178,17 @@ To try a build without touching a working install, point it at a sandbox:
 
 ### Configuration
 
-Settings live in `~/.copilot/copilot-ha-bridge.config.json` (written by the installer,
+Settings live in `~/.agent-ha-bridge/config.json` (written by the installer,
 never in the repo). See [`config.example.json`](config.example.json).
 
 | Key | Meaning |
 |---|---|
 | `homeAssistant.baseUrl` | e.g. `http://homeassistant.local:8123` |
 | `homeAssistant.token` | Long-lived access token |
-| `homeAssistant.tokenEnvVar` | Read the token from this env var instead (default `COPILOT_HA_TOKEN`) |
-| `dashboard.urlPath` | Lovelace dashboard slug (default `copilot-decisions`) |
+| `homeAssistant.tokenEnvVar` | Read the token from this env var instead (default `AGENT_HA_TOKEN`; `COPILOT_HA_TOKEN` still works) |
+| `dashboard.urlPath` | Lovelace dashboard slug (default `agent-decisions`) |
 | `notifications.enabled` / `.service` | Optional notify-style service |
-| `copilot.sessionStateRoot` | Override session-state location if not `~/.copilot/session-state` |
+| `copilot.sessionStateRoot` | Override the Copilot CLI's session-state location if not `~/.copilot/session-state` |
 | `newSession.enabled` | Set to `false` to hide the "Start a new session" controls (default `true`) |
 | `newSession.launcher` | `auto` (default: Agency when installed), `agency`, or `copilot` |
 | `newSession.profiles` | Agency profiles offered on the dashboard (default `["work","home","local"]`) |
@@ -201,11 +201,11 @@ never in the repo). See [`config.example.json`](config.example.json).
 | `newSession.extraArgs` | Extra CLI arguments for launched sessions, e.g. `["--plan"]` |
 | `newSession.copilotPath` | Full path to `copilot.exe` if it is not on the daemon's PATH |
 | `newSession.agencyPath` | Full path to `agency.exe` if it is not on the daemon's PATH |
-| `updates.repository` | Repository to check for releases (default `danswett/copilot-ha-bridge`) |
+| `updates.repository` | Repository to check for releases (default `danswett/agent-ha-bridge`) |
 | `updates.checkForUpdates` | Set to `false` to disable the update check |
 | `updates.checkHours` | How often to check GitHub for a release (default `6`, i.e. 4×/day) |
 
-Prefer keeping the token out of a file? Leave `token` empty and set `COPILOT_HA_TOKEN`
+Prefer keeping the token out of a file? Leave `token` empty and set `AGENT_HA_TOKEN`
 in your environment.
 
 ---
@@ -222,7 +222,7 @@ authenticates with a long-lived token and provisions everything itself:
 | `sensor.agent_bridge_sessions` | MQTT discovery, published by the daemon |
 | New-session controls (`text`, `select`, `button`, `sensor`) | MQTT discovery, on the same bridge-level device as the update entity |
 | `input_boolean.agent_bridge_detailed_activity` (shown as **Detailed activity**) | Created by the daemon at startup via the helper API |
-| The **Agent Sessions** dashboard (`copilot-decisions`) | Regenerated by the daemon whenever the live session set changes |
+| The **Agent Sessions** dashboard (`agent-decisions`) | Regenerated by the daemon whenever the live session set changes |
 
 ### Entity ids are `agent_bridge_*`
 
@@ -240,6 +240,32 @@ delete-and-recreate would silently reset it to off.
 The generated dashboard follows automatically. **Any automations, scripts or templates
 you wrote against the old ids need updating** — check *Settings → Automations* if you
 built anything on them.
+
+### Upgrading from `copilot-ha-bridge`
+
+The project was called `copilot-ha-bridge` until it grew past Copilot CLI. Everything
+it installs now carries the neutral name, and re-running `install.ps1` migrates an
+existing setup in one pass:
+
+| Before | Now |
+|---|---|
+| `~/.copilot/hooks/*.ps1` (shared scripts) | `~/.agent-ha-bridge/hooks/` |
+| `~/.copilot/copilot-ha-bridge.config.json` | `~/.agent-ha-bridge/config.json` |
+| `~/.copilot/mcp`, `~/.copilot/codex-bridge` | `~/.agent-ha-bridge/mcp`, `.../codex-bridge` |
+| Scheduled task `CopilotBridgeDaemon` | `AgentBridgeDaemon` |
+| Dashboard `/copilot-decisions` | `/agent-decisions` |
+| `%TEMP%\copilot-decision-bridge.log` | `%TEMP%\agent-decision-bridge.log` |
+| `$env:COPILOT_HA_BRIDGE_CONFIG` | `$env:AGENT_HA_BRIDGE_CONFIG` |
+
+Your Home Assistant token is moved, not re-requested, so the upgrade never prompts for
+it again. The old scheduled task and Apps & features entry are removed, and the old
+dashboard is replaced by `/agent-decisions` — **re-pin it in the sidebar** if you had
+it placed. `~/.copilot` keeps only what belongs to the Copilot CLI: its hook definition
+and its session transcripts.
+
+Entity ids do not change, so automations built on `agent_bridge_*` keep working. The
+old `$env:COPILOT_HA_BRIDGE_CONFIG` and config path are still read as a fallback, so a
+machine that has not been upgraded yet keeps running.
 
 ### There is no MQTT broker to configure
 
@@ -314,7 +340,7 @@ Configure the workspace list first, or the card has nothing to offer:
 ```jsonc
 "newSession": {
   "workspaces": [
-    { "label": "Bridge", "path": "~/repos/copilot-ha-bridge" },
+    { "label": "Bridge", "path": "~/repos/agent-ha-bridge" },
     "~/repos/my-app"
   ]
 }
@@ -411,6 +437,7 @@ the dashboard view, so Home Assistant is left clean; without it they linger.
 .\tests\test-new-session.ps1      # launching a session: argument quoting, the workspace allowlist, press handling
 .\tests\test-stop-session.ps1     # ending a session: graceful /exit, terminate fallback, press handling
 .\tests\test-install-clients.ps1  # installer client selection (‑Clients, persisted, defaults)
+.\tests\test-layout-migration.ps1 # upgrading a pre-rename ~/.copilot install in place
 .\tests\test-verbose-toggle.ps1   # Detailed activity helper is provisioned without ever resetting it
 ```
 
@@ -427,13 +454,13 @@ The Claude adapter and the MCP server have their own suites — see their README
 | "Entity not found" on a card | The daemon provisions entities on its next pass; check the daemon log. |
 | Detailed activity row is unavailable | Home Assistant is still starting: the toggle appears on its own once it finishes. The daemon ensures the helper exists at startup but never recreates it, so its on/off value is preserved across restarts. Restart the daemon and check the log for `verbose toggle ready`. |
 | Answers picked in Home Assistant do nothing | The session predates the install — `/restart` it. |
-| Nothing at all happens | Check `$env:TEMP\copilot-bridge-daemon.log` and `copilot-decision-bridge.log`. |
+| Nothing at all happens | Check `$env:TEMP\agent-bridge-daemon.log` and `agent-decision-bridge.log`. |
 
-The daemon runs as the hidden scheduled task `CopilotBridgeDaemon`:
+The daemon runs as the hidden scheduled task `AgentBridgeDaemon`:
 
 ```powershell
-Get-ScheduledTask -TaskName CopilotBridgeDaemon
-Get-Content $env:TEMP\copilot-bridge-daemon.log -Tail 20
+Get-ScheduledTask -TaskName AgentBridgeDaemon
+Get-Content $env:TEMP\agent-bridge-daemon.log -Tail 20
 ```
 
 ---
@@ -501,13 +528,13 @@ mid-write. Real arguments always win over recovered ones.
 | `decision-ha-websocket.ps1` | Entity-registry reads and renames, scoped `subscribe_trigger` waits, dashboard generation |
 | `decision-inject.ps1` | `AttachConsole` + `WriteConsoleInput` delivery, with session→pid lookup from `inuse.<pid>.lock` |
 | `session-launch.ps1` | Starting a new CLI session: the workspace allowlist, argument quoting, and the launch itself |
-| `copilot-bridge-daemon.ps1` | The loop: reconcile sessions, stream activity, sweep orphans, deliver answers |
-| `copilot-bridge-supervisor.ps1` | Keeps one daemon alive with backoff; a named mutex prevents a second instance |
+| `agent-bridge-daemon.ps1` | The loop: reconcile sessions, stream activity, sweep orphans, deliver answers |
+| `agent-bridge-supervisor.ps1` | Keeps one daemon alive with backoff; a named mutex prevents a second instance |
 | `route-ask-user-v3.ps1` | The non-blocking `ask_user` router |
 | `notify-agent-response.ps1` | Non-blocking response mirror + card |
 
-Logs: `%TEMP%\copilot-decision-bridge.log` (hooks), `%TEMP%\copilot-bridge-daemon.log`,
-`%TEMP%\copilot-bridge-supervisor.log`. Hook config changes reach a running CLI only
+Logs: `%TEMP%\agent-decision-bridge.log` (hooks), `%TEMP%\agent-bridge-daemon.log`,
+`%TEMP%\agent-bridge-supervisor.log`. Hook config changes reach a running CLI only
 after `/restart`; the daemon is shared and picks up new sessions on its own reconcile.
 
 ### Design constraints worth knowing
@@ -521,7 +548,7 @@ after `/restart`; the daemon is shared and picks up new sessions on its own reco
 * Waits use a scoped `subscribe_trigger`, **not** a broad `state_changed` subscription —
   the latter floods the CPU.
 * The daemon must keep a **real** console for `AttachConsole` to work. It is launched
-  hidden via `copilot-bridge-launch.vbs` (`WScript.Shell.Run(..., 0, …)`). Do not switch
+  hidden via `agent-bridge-launch.vbs` (`WScript.Shell.Run(..., 0, …)`). Do not switch
   it to `conhost --headless`, which gives a pseudoconsole and breaks injection.
 
 ---
@@ -570,7 +597,7 @@ Claude Desktop and other MCP clients, on any OS. It races a Home Assistant card
 against the app's own elicitation prompt and cancels whichever loses.
 
 The installer's picker can set it up for you (`-Clients mcp`): it installs the server
-under `~/.copilot/mcp`, runs `npm install`, writes a paste-ready client config, and
+under `~/.agent-ha-bridge/mcp`, runs `npm install`, writes a paste-ready client config, and
 registers Claude Desktop automatically if present. Or run
 [`mcp/install-mcp.ps1`](mcp/install-mcp.ps1) directly.
 

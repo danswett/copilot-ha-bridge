@@ -426,7 +426,7 @@ function Publish-CopilotMqttUpdate {
     $state = @{
         installed_version = $InstalledVersion
         latest_version    = $LatestVersion
-        title             = 'Copilot CLI Home Assistant bridge'
+        title             = 'AI coding agent Home Assistant bridge'
         # Always present, so Home Assistant shows a spinner while an install runs and
         # clears it the moment a later publish reports false, rather than inferring
         # the flag from an absent key.

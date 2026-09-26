@@ -24,12 +24,12 @@
 Set-StrictMode -Version Latest
 
 $script:BridgeUpdateConfig = @{
-    CacheFile     = Join-Path $env:TEMP 'copilot-bridge-update.json'
+    CacheFile     = Join-Path $env:TEMP 'agent-bridge-update.json'
     # How often to check GitHub for a new release. Four times a day catches a release
     # within a few hours and still barely touches the unauthenticated GitHub rate
     # limit (60/hour/IP). Tunable with updates.checkHours in the config.
     CheckHours    = [double](Get-BridgeSetting 'updates.checkHours' 6)
-    UserAgent     = 'copilot-ha-bridge'
+    UserAgent     = 'agent-ha-bridge'
     RequestTimeout = 15
 }
 
@@ -54,7 +54,7 @@ function Get-BridgeInstalledVersion {
 
 function Get-BridgeUpdateRepository {
     $repository = Get-BridgeSetting 'updates.repository' ''
-    if ([string]::IsNullOrWhiteSpace($repository)) { $repository = 'danswett/copilot-ha-bridge' }
+    if ([string]::IsNullOrWhiteSpace($repository)) { $repository = 'danswett/agent-ha-bridge' }
     $repository
 }
 
@@ -180,7 +180,7 @@ function Invoke-BridgeSelfUpdate {
         return [pscustomobject]@{ Started = $false; Detail = 'the release has no downloadable archive' }
     }
 
-    $staging = Join-Path $env:TEMP "copilot-ha-bridge-update-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    $staging = Join-Path $env:TEMP "agent-ha-bridge-update-$([guid]::NewGuid().ToString('N').Substring(0,8))"
     $script = Join-Path $staging 'run-update.ps1'
 
     # Validate and single-quote-escape TargetHome before it is written into the
@@ -196,14 +196,14 @@ function Invoke-BridgeSelfUpdate {
     $scriptText = @"
 `$ErrorActionPreference = 'Stop'
 `$staging = '$staging'
-`$log = Join-Path `$env:TEMP 'copilot-bridge-update.log'
-`$outcomeFile = Join-Path `$env:TEMP 'copilot-bridge-update-outcome.json'
+`$log = Join-Path `$env:TEMP 'agent-bridge-update.log'
+`$outcomeFile = Join-Path `$env:TEMP 'agent-bridge-update-outcome.json'
 function Write-UpdateLog { param([string]`$Message) Add-Content -LiteralPath `$log -Value ("{0} {1}" -f [DateTimeOffset]::Now.ToString('o'), `$Message) }
 
 try {
     Write-UpdateLog 'downloading $($status.Latest)'
     `$zip = Join-Path `$staging 'release.zip'
-    Invoke-WebRequest -Uri '$($status.Zip)' -OutFile `$zip -Headers @{ 'User-Agent' = 'copilot-ha-bridge' } -UseBasicParsing
+    Invoke-WebRequest -Uri '$($status.Zip)' -OutFile `$zip -Headers @{ 'User-Agent' = 'agent-ha-bridge' } -UseBasicParsing
     Expand-Archive -LiteralPath `$zip -DestinationPath `$staging -Force
     `$root = Get-ChildItem -LiteralPath `$staging -Directory | Select-Object -First 1
     if (-not `$root) { throw 'the archive did not contain the expected folder' }
@@ -231,7 +231,7 @@ try {
     # makes the supervisor relaunch a fresh one, which reads the marker above and
     # announces the result.
     Get-CimInstance Win32_Process -Filter "Name='pwsh.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { `$_.CommandLine -match 'copilot-bridge-daemon\.ps1' } |
+        Where-Object { `$_.CommandLine -match 'agent-bridge-daemon\.ps1' } |
         ForEach-Object { Stop-Process -Id `$_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 catch {
@@ -257,7 +257,7 @@ finally {
 
     # The child's own output would otherwise be returned alongside the result object,
     # leaving callers with an array instead of the object they expect. The updater
-    # writes its progress to copilot-bridge-update.log, so nothing is lost.
+    # writes its progress to agent-bridge-update.log, so nothing is lost.
     & (Get-Command pwsh).Source -NoProfile -ExecutionPolicy Bypass -File $script *>&1 | Out-Null
     [pscustomobject]@{ Started = $true; Detail = "updated to $($status.Latest)" }
 }

@@ -50,7 +50,7 @@ $cfg = $script:SavedConfig
 Test-That 'the dashboard title is Agent Sessions' { $cfg.title -eq 'Agent Sessions' }
 Test-That 'the view tab is titled Sessions' { $cfg.views[0].title -eq 'Sessions' }
 Test-That 'the view path stays decision (URL slug unchanged)' { $cfg.views[0].path -eq 'decision' }
-Test-That 'it is saved to the copilot-decisions slug' { $script:SavedUrlPath -eq $script:DecisionBridgeConfig.DashboardUrlPath }
+Test-That 'it is saved to the agent-decisions slug' { $script:SavedUrlPath -eq $script:DecisionBridgeConfig.DashboardUrlPath }
 
 Write-Host '--- the control card summarises sessions and the installed version ---'
 # The summary and its toggle are one stacked card now, so the markdown lives a level

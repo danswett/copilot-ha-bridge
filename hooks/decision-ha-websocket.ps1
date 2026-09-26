@@ -570,9 +570,65 @@ function Set-CopilotMqttNewSessionEntityIds {
     $changed
 }
 
+$script:BridgeDashboardReady = $false
+
+function Initialize-BridgeDashboard {
+    <#
+        Makes sure the Lovelace dashboard the bridge writes to actually exists, and
+        retires the pre-rename `copilot-decisions` one.
+
+        `lovelace/config/save` only works against a registered dashboard, so a fresh
+        install - or the slug change that came with the rename - needs the dashboard
+        created first. Runs once per process; the daemon is long-lived, so repeating
+        the round trip on every session change would be pure overhead.
+    #>
+    param([switch]$Force)
+
+    if ($script:BridgeDashboardReady -and -not $Force) { return }
+
+    $target = $script:DecisionBridgeConfig.DashboardUrlPath
+    $legacy = 'copilot-decisions'
+
+    try {
+        $listed = Invoke-CopilotHaWebSocket -Commands @(@{ type = 'lovelace/dashboards/list' })
+        $dashboards = @($listed[0].result)
+
+        if (-not ($dashboards | Where-Object { $_.url_path -eq $target })) {
+            [void](Invoke-CopilotHaWebSocket -Commands @(
+                @{
+                    type = 'lovelace/dashboards/create'
+                    url_path = $target
+                    title = 'Agent Sessions'
+                    icon = 'mdi:robot'
+                    show_in_sidebar = $true
+                    require_admin = $false
+                }
+            ))
+        }
+
+        # Only once the replacement is in place, so a failure part way through never
+        # leaves the user with no dashboard at all.
+        if ($target -ne $legacy) {
+            $stale = $dashboards | Where-Object { $_.url_path -eq $legacy } | Select-Object -First 1
+            if ($stale) {
+                [void](Invoke-CopilotHaWebSocket -Commands @(
+                    @{ type = 'lovelace/dashboards/delete'; dashboard_id = $stale.id }
+                ))
+            }
+        }
+
+        $script:BridgeDashboardReady = $true
+    }
+    catch {
+        # A save against an existing dashboard still works, so this must never be
+        # fatal - the next cycle retries.
+        Write-Verbose "Dashboard preparation failed: $($_.Exception.Message)"
+    }
+}
+
 function Save-CopilotSessionDashboard {
     <#
-        Regenerates the copilot-decisions dashboard for the per-session MQTT model.
+        Regenerates the agent-decisions dashboard for the per-session MQTT model.
 
         The dashboard is fully generated from the live session list, so it is rebuilt
         whenever a session appears or exits rather than hand-edited. It has a control
@@ -1167,6 +1223,7 @@ ha-card {
         })
     }
 
+    Initialize-BridgeDashboard
     [void](Invoke-CopilotHaWebSocket -Commands @(
         @{
             type = 'lovelace/config/save'

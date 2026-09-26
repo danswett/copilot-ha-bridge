@@ -17,7 +17,7 @@
 
 Set-StrictMode -Version Latest
 
-$script:ClaudeStateRoot = Join-Path $env:TEMP 'copilot-bridge-claude'
+$script:ClaudeStateRoot = Join-Path $env:TEMP 'agent-bridge-claude'
 $script:ClaudeProjectsRoot = Join-Path $HOME '.claude\projects'
 # A session whose registry entry has not been refreshed in this long is treated as
 # gone, so a crashed session cannot hold entities open forever.

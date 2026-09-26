@@ -11,7 +11,7 @@
     exercises the shared adapter orchestration (bridge-adapter.ps1) end to end.
 
     Requires the main bridge to be installed (the shared Home Assistant layer, and now
-    bridge-adapter.ps1, live in ~/.copilot/hooks). Creates entities and removes them
+    bridge-adapter.ps1, live in ~/.agent-ha-bridge/hooks). Creates entities and removes them
     again. Not part of CI because it needs a real Home Assistant.
 #>
 
@@ -21,7 +21,7 @@ param()
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$core = Join-Path $HOME '.copilot\hooks'
+$core = Join-Path $HOME '.agent-ha-bridge\hooks'
 if (-not (Test-Path -LiteralPath (Join-Path $core 'bridge-adapter.ps1'))) {
     Write-Host 'The main bridge (with bridge-adapter.ps1) is not installed; run install.ps1 first.' -ForegroundColor Yellow
     exit 2

@@ -34,7 +34,7 @@ $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
 $claudeHome = Join-Path $installHome '.claude'
 $adapterDir = Join-Path $claudeHome 'ha-bridge'
 $settingsPath = Join-Path $claudeHome 'settings.json'
-$coreDir = Join-Path $installHome '.copilot\hooks'
+$coreDir = Join-Path $installHome '.agent-ha-bridge\hooks'
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -136,7 +136,7 @@ if ($Uninstall) {
         Remove-Item -LiteralPath $adapterDir -Recurse -Force
         Write-Host '    adapter removed'
     }
-    $stateRoot = Join-Path $env:TEMP 'copilot-bridge-claude'
+    $stateRoot = Join-Path $env:TEMP 'agent-bridge-claude'
     if (Test-Path -LiteralPath $stateRoot) { Remove-Item -LiteralPath $stateRoot -Recurse -Force }
     Write-Step 'Done'
     return
@@ -175,4 +175,4 @@ Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Yellow
 Write-Host '  1. Restart any running Claude Code sessions so they pick up the hooks.'
 Write-Host '  2. The bridge daemon finds Claude sessions on its own; no restart needed.'
-Write-Host "     Logs: `$env:TEMP\copilot-decision-bridge.log and copilot-bridge-daemon.log"
+Write-Host "     Logs: `$env:TEMP\agent-decision-bridge.log and agent-bridge-daemon.log"

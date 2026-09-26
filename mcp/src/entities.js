@@ -7,12 +7,12 @@
  * sticks without a device echoing it back. With a state_topic the selection would
  * never hold, because nothing is subscribed on the device side.
  *
- * The node id is namespaced `mcp_`, distinct from the CLI bridge's `copilot_`, so the
- * two can share one Home Assistant instance without ever colliding.
+ * The node id is namespaced `mcp_`, distinct from the CLI bridge's `agent_bridge_`,
+ * so the two can share one Home Assistant instance without ever colliding.
  */
 
 const DISCOVERY_PREFIX = 'homeassistant';
-const COMMAND_PREFIX = 'copilot_mcp';
+const COMMAND_PREFIX = 'agent_mcp';
 
 export const IDLE = 'Idle';
 
@@ -40,7 +40,7 @@ function device(node, title) {
   return {
     identifiers: [node],
     name: title,
-    manufacturer: 'copilot-ha-bridge',
+    manufacturer: 'agent-ha-bridge',
     model: 'MCP client',
   };
 }
@@ -136,8 +136,8 @@ export async function removeEntities(ha, node) {
  * Forces the entities onto their deterministic ids.
  *
  * Home Assistant builds an MQTT entity_id from the device name plus the entity name
- * and ignores `object_id` entirely, so a device titled "Copilot MCP" yields
- * select.copilot_mcp_decision rather than anything derived from unique_id. Renaming
+ * and ignores `object_id` entirely, so a device titled "Agent MCP" yields
+ * select.agent_mcp_decision rather than anything derived from unique_id. Renaming
  * through the entity registry is the only way to make entityIds() reliable, and it has
  * to happen before anything tries to read or write those entities.
  */

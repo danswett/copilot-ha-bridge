@@ -32,11 +32,11 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
-$bridgeRoot = Join-Path $installHome '.copilot\codex-bridge'
-$marketplaceName = 'copilot-ha-bridge'
-$pluginName = 'copilot-ha-bridge'
+$bridgeRoot = Join-Path $installHome '.agent-ha-bridge\codex-bridge'
+$marketplaceName = 'agent-ha-bridge'
+$pluginName = 'agent-ha-bridge'
 $pluginRoot = Join-Path $bridgeRoot "plugins\$pluginName"
-$coreDir = Join-Path $installHome '.copilot\hooks'
+$coreDir = Join-Path $installHome '.agent-ha-bridge\hooks'
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -63,7 +63,7 @@ if ($Uninstall) {
         Remove-Item -LiteralPath $bridgeRoot -Recurse -Force
         Write-Host '    adapter removed'
     }
-    $stateRoot = Join-Path $env:TEMP 'copilot-bridge-codex'
+    $stateRoot = Join-Path $env:TEMP 'agent-bridge-codex'
     if (Test-Path -LiteralPath $stateRoot) { Remove-Item -LiteralPath $stateRoot -Recurse -Force }
     Write-Step 'Done'
     Write-Host 'Trust entries under [hooks.state] in the Codex config are left alone;' -ForegroundColor Yellow
@@ -161,4 +161,4 @@ Write-Host '  Start Codex once and approve the hook trust prompt.' -ForegroundCo
 Write-Host '  Until you do, Codex skips these hooks silently: no error, no log line,' -ForegroundColor Yellow
 Write-Host '  which looks exactly like a broken install.' -ForegroundColor Yellow
 Write-Host ''
-Write-Host "Logs: `$env:TEMP\copilot-decision-bridge.log"
+Write-Host "Logs: `$env:TEMP\agent-decision-bridge.log"

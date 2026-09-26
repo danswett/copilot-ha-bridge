@@ -74,7 +74,7 @@ function loadConfig() {
   return {
     baseUrl,
     token,
-    title: process.env.HA_CARD_TITLE || 'Copilot MCP',
+    title: process.env.HA_CARD_TITLE || 'Agent MCP',
     timeoutMs: Number(process.env.HA_TIMEOUT_MS) || DEFAULT_TIMEOUT_MS,
     // Set HA_DASHBOARD='' to manage cards yourself.
     dashboard:
@@ -129,7 +129,7 @@ async function main() {
   const ha = new HomeAssistant(config);
 
   const server = new Server(
-    { name: 'copilot-ha-bridge', version: serverVersion() },
+    { name: 'agent-ha-bridge', version: serverVersion() },
     { capabilities: { tools: {} } },
   );
 

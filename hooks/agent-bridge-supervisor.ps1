@@ -6,14 +6,14 @@
     cannot spin. The daemon itself holds a named mutex, so even if this supervisor is
     started twice only one daemon runs.
 
-    Deliberately thin: all real logic lives in copilot-bridge-daemon.ps1, so this
+    Deliberately thin: all real logic lives in agent-bridge-daemon.ps1, so this
     wrapper rarely needs to change.
 #>
 
 $ErrorActionPreference = 'Continue'
 
-$daemon = Join-Path $PSScriptRoot 'copilot-bridge-daemon.ps1'
-$logFile = Join-Path $env:TEMP 'copilot-bridge-supervisor.log'
+$daemon = Join-Path $PSScriptRoot 'agent-bridge-daemon.ps1'
+$logFile = Join-Path $env:TEMP 'agent-bridge-supervisor.log'
 
 function Write-SupervisorLog {
     param([string]$Message)

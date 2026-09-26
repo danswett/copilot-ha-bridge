@@ -5,7 +5,7 @@
 .DESCRIPTION
     Downloads the repository and runs install.ps1. Intended for:
 
-        irm https://raw.githubusercontent.com/danswett/copilot-ha-bridge/main/bootstrap.ps1 | iex
+        irm https://raw.githubusercontent.com/danswett/agent-ha-bridge/main/bootstrap.ps1 | iex
 
     install.ps1 is interactive, so this needs no arguments: it discovers Home
     Assistant, confirms the URL, and walks you through creating a token. To pass
@@ -14,9 +14,9 @@
 
 $ErrorActionPreference = 'Stop'
 
-$repo = 'danswett/copilot-ha-bridge'
+$repo = 'danswett/agent-ha-bridge'
 $branch = 'main'
-$staging = Join-Path ([IO.Path]::GetTempPath()) "copilot-ha-bridge-$([guid]::NewGuid().ToString('N').Substring(0,8))"
+$staging = Join-Path ([IO.Path]::GetTempPath()) "agent-ha-bridge-$([guid]::NewGuid().ToString('N').Substring(0,8))"
 $zipPath = "$staging.zip"
 
 if ($PSVersionTable.PSVersion.Major -lt 7) {

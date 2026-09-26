@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Removes the Copilot <-> Home Assistant bridge.
+    Removes the AI coding agent <-> Home Assistant bridge.
 
 .DESCRIPTION
     Stops and unregisters the scheduled task, removes the hook scripts and hook
@@ -17,8 +17,8 @@
     entities. Requires the config to still be present.
 
 .PARAMETER TargetHome
-    Uninstall from this directory's .copilot instead of $HOME's. Intended for testing;
-    it also skips the machine-wide steps (scheduled task, process termination).
+    Uninstall from this directory's .agent-ha-bridge instead of $HOME's. Intended for
+    testing; it also skips the machine-wide steps (scheduled task, process termination).
 #>
 
 [CmdletBinding()]
@@ -32,13 +32,21 @@ $ErrorActionPreference = 'Stop'
 
 $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
 $copilotHome = Join-Path $installHome '.copilot'
-$arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBridge' +
+$arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\AgentHaBridge' +
           $(if ($TargetHome) { '_Sandbox' } else { '' })
-$bridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
-$hooksDir = Join-Path $copilotHome 'hooks'
+$bridgeHome = Join-Path $installHome '.agent-ha-bridge'
+$hooksDir = Join-Path $bridgeHome 'hooks'
+$hookConfigPath = Join-Path $copilotHome 'hooks\decision-notifier.json'
 $legacySkillDir = Join-Path $copilotHome 'skills\decision-notifier'
-$configPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
-$taskName = 'CopilotBridgeDaemon'
+$configPath = Join-Path $bridgeHome 'config.json'
+$taskName = 'AgentBridgeDaemon'
+# Pre-rename artefacts, removed too so an upgrade-then-uninstall leaves nothing.
+$legacyTaskName = 'CopilotBridgeDaemon'
+$legacyHooksDir = Join-Path $copilotHome 'hooks'
+$legacyConfigPath = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
+$legacyBridgeHome = Join-Path $copilotHome 'copilot-ha-bridge'
+$legacyArpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\CopilotHaBridge' +
+                $(if ($TargetHome) { '_Sandbox' } else { '' })
 
 function Write-Step { param([string]$Message) Write-Host "==> $Message" -ForegroundColor Cyan }
 
@@ -101,20 +109,22 @@ if ($TargetHome) {
 }
 else {
     Write-Step "Removing the '$taskName' scheduled task"
-    if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
-        Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-        Write-Host '    removed'
-    }
-    else {
-        Write-Host '    not registered'
+    foreach ($name in @($taskName, $legacyTaskName)) {
+        if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
+            Stop-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $name -Confirm:$false
+            Write-Host "    removed $name"
+        }
+        else {
+            Write-Host "    $name not registered"
+        }
     }
 
     Write-Step 'Stopping any running daemon or supervisor'
     foreach ($proc in Get-Process pwsh -ErrorAction SilentlyContinue) {
         try {
             $cmd = (Get-CimInstance Win32_Process -Filter "ProcessId=$($proc.Id)").CommandLine
-            if ($cmd -match 'copilot-bridge-(daemon|supervisor)\.ps1') {
+            if ($cmd -match '(agent|copilot)-bridge-(daemon|supervisor)\.ps1') {
                 Stop-Process -Id $proc.Id -Force
                 Write-Host "    stopped pid $($proc.Id)"
             }
@@ -126,13 +136,20 @@ else {
 Write-Step 'Removing hook scripts'
 $files = @(
     'decision-bridge-common.ps1', 'decision-mqtt.ps1', 'decision-ha-websocket.ps1',
-    'decision-inject.ps1', 'copilot-bridge-daemon.ps1', 'copilot-bridge-supervisor.ps1',
-    'copilot-bridge-launch.vbs', 'route-ask-user-v3.ps1', 'notify-agent-response.ps1',
-    'notify-home-assistant.ps1', 'decision-notifier.json'
+    'decision-inject.ps1', 'agent-bridge-daemon.ps1', 'agent-bridge-supervisor.ps1',
+    'agent-bridge-launch.vbs', 'route-ask-user-v3.ps1', 'notify-agent-response.ps1',
+    'notify-home-assistant.ps1', 'bridge-adapter.ps1', 'bridge-update.ps1',
+    'session-launch.ps1', 'VERSION'
 )
 foreach ($name in $files) {
     $path = Join-Path $hooksDir $name
     if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force; Write-Host "    $name" }
+}
+
+# The Copilot CLI's hook definition is the one bridge file outside the bridge root.
+if (Test-Path -LiteralPath $hookConfigPath) {
+    Remove-Item -LiteralPath $hookConfigPath -Force
+    Write-Host "    $hookConfigPath"
 }
 
 if (Test-Path -LiteralPath $legacySkillDir) {
@@ -140,7 +157,29 @@ if (Test-Path -LiteralPath $legacySkillDir) {
     Remove-Item -LiteralPath $legacySkillDir -Recurse -Force
 }
 
-$mcpDir = Join-Path $copilotHome 'mcp'
+# Anything a pre-rename install left in ~/.copilot.
+foreach ($name in @(
+    'decision-bridge-common.ps1', 'decision-mqtt.ps1', 'decision-ha-websocket.ps1',
+    'decision-inject.ps1', 'bridge-adapter.ps1', 'bridge-update.ps1', 'session-launch.ps1',
+    'copilot-bridge-daemon.ps1', 'copilot-bridge-supervisor.ps1', 'copilot-bridge-launch.vbs',
+    'route-ask-user-v3.ps1', 'notify-agent-response.ps1', 'notify-home-assistant.ps1', 'VERSION')) {
+    $path = Join-Path $legacyHooksDir $name
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        Write-Host "    $path"
+    }
+}
+foreach ($path in @($legacyConfigPath, "$legacyConfigPath.bak", $legacyBridgeHome)) {
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "    $path"
+    }
+}
+if (Test-Path -LiteralPath $legacyArpKey) {
+    Remove-Item -LiteralPath $legacyArpKey -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+$mcpDir = Join-Path $bridgeHome 'mcp'
 if (Test-Path -LiteralPath $mcpDir) {
     Write-Step 'Removing the MCP server'
     Remove-Item -LiteralPath $mcpDir -Recurse -Force
@@ -166,9 +205,18 @@ if (Test-Path -LiteralPath $arpKey) {
 # the folder while it executes is fine on Windows: the file stays open until the
 # process exits.
 if (Test-Path -LiteralPath $bridgeHome) {
-    Write-Step 'Removing the installed uninstaller'
-    Remove-Item -LiteralPath $bridgeHome -Recurse -Force -ErrorAction SilentlyContinue
+    if ($KeepConfig) {
+        # The config lives in this folder, so clear it out item by item instead.
+        Write-Step 'Removing the bridge root (keeping the config)'
+        Get-ChildItem -LiteralPath $bridgeHome -Force |
+            Where-Object { $_.FullName -ne $configPath -and $_.FullName -ne "$configPath.bak" } |
+            ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    else {
+        Write-Step 'Removing the bridge root'
+        Remove-Item -LiteralPath $bridgeHome -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Step 'Done'
-Write-Host 'Restart any running Copilot CLI sessions to drop the hooks.' -ForegroundColor Yellow
+Write-Host 'Restart any running agent CLI sessions to drop the hooks.' -ForegroundColor Yellow

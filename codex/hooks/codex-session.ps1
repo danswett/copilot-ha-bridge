@@ -32,7 +32,7 @@
 
 Set-StrictMode -Version Latest
 
-$script:CodexStateRoot = Join-Path $env:TEMP 'copilot-bridge-codex'
+$script:CodexStateRoot = Join-Path $env:TEMP 'agent-bridge-codex'
 # Codex writes rollouts under CODEX_HOME/sessions/<yyyy>/<MM>/<dd>/.
 $script:CodexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME '.codex' }
 $script:CodexSessionStaleMinutes = 240

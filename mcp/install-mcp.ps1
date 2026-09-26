@@ -4,7 +4,7 @@
     Sets up the bridge's MCP server and hands you a ready-to-paste client config.
 
 .DESCRIPTION
-    Copies the Node MCP server into ~/.copilot/mcp so it survives deleting the clone,
+    Copies the Node MCP server into ~/.agent-ha-bridge/mcp so it survives deleting the clone,
     installs its dependencies, and writes a paste-ready stdio config using the Home
     Assistant URL and token already in the bridge config. If Claude Desktop is present,
     the server is written straight into its config; other MCP clients (Cursor, ChatGPT)
@@ -16,8 +16,8 @@
     URL and token.
 
 .PARAMETER TargetHome
-    Install into this directory's .copilot instead of $HOME's. For testing without
-    touching a real setup.
+    Install into this directory's .agent-ha-bridge instead of $HOME's. For testing
+    without touching a real setup.
 
 .PARAMETER Uninstall
     Remove the MCP server and its Claude Desktop registration.
@@ -31,9 +31,9 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $installHome = if ($TargetHome) { $TargetHome } else { $HOME }
-$copilotHome = Join-Path $installHome '.copilot'
-$mcpDir      = Join-Path $copilotHome 'mcp'
-$configPath  = Join-Path $copilotHome 'copilot-ha-bridge.config.json'
+$bridgeHome  = Join-Path $installHome '.agent-ha-bridge'
+$mcpDir      = Join-Path $bridgeHome 'mcp'
+$configPath  = Join-Path $bridgeHome 'config.json'
 $snippetPath = Join-Path $mcpDir 'mcp-client-config.json'
 $serverName  = 'home-assistant-bridge'
 # Overridable so a sandbox test never touches the real Claude Desktop config.
